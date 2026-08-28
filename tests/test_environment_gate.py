@@ -179,6 +179,7 @@ def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: P
                 "provider_base_url": "https://api.cerebras.ai/v1",
                 "parallel_tool_calls": False,
                 "response_format_on_tool_turn": False,
+                "runtime_identity_verified": True,
                 "serial_tool_loop_executed": True,
                 "native_denial_executed": True,
                 "denied_tool_name": "send_email",

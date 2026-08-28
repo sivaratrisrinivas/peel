@@ -312,6 +312,7 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
         "side_effects_observed": _evidence_bool(proof, "side_effects_observed"),
         "parallel_tool_calls": proof.get("parallel_tool_calls") is False,
         "response_format_on_tool_turn": _evidence_bool(proof, "response_format_on_tool_turn"),
+        "runtime_identity_verified": _evidence_bool(proof, "runtime_identity_verified"),
         "model_name": _evidence_string(proof, "model_name") in SUPPORTED_TRUEFORGE_CEREBRAS_MODELS,
         "provider_base_url": _evidence_string(proof, "provider_base_url") == "https://api.cerebras.ai/v1",
     }
@@ -333,6 +334,7 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
         and _evidence_false(proof, "side_effects_observed")
         and required_proof["parallel_tool_calls"]
         and _evidence_false(proof, "response_format_on_tool_turn")
+        and required_proof["runtime_identity_verified"]
         and required_proof["model_name"]
         and required_proof["provider_base_url"]
     )

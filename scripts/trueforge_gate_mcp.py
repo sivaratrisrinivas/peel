@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,9 +50,27 @@ class _FixtureState:
 
     def _write(self) -> None:
         self._status_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._status_file.with_name(f".{self._status_file.name}.tmp")
-        temporary.write_text(json.dumps(self.snapshot(), sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(self._status_file)
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._status_file.parent,
+                prefix=f".{self._status_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_name = temporary.name
+                temporary.write(json.dumps(self.snapshot(), sort_keys=True) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            if temporary_name is None:
+                raise RuntimeError("temporary status file was not created")
+            os.replace(temporary_name, self._status_file)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                Path(temporary_name).unlink(missing_ok=True)
 
 
 def _tool_definitions() -> list[dict[str, Any]]:

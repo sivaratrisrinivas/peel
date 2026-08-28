@@ -129,18 +129,21 @@ def _tool_calls(events: list[dict[str, Any]]) -> dict[str, str]:
         event_type = event.get("type")
         if event_type not in {"model.message", "model.message.delta"}:
             continue
-        for call in event.get("tool_calls", []):
+        for call in event.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
             function = call.get("function")
             if not isinstance(function, dict):
                 function = {}
             call_id = call.get("id")
-            if not isinstance(call_id, str):
-                index = call.get("index")
-                if not isinstance(index, int):
-                    continue
+            index = call.get("index")
+            if isinstance(call_id, str):
+                if isinstance(index, int):
+                    delta_slots[index] = call_id
+            elif isinstance(index, int):
                 call_id = delta_slots.setdefault(index, f"delta:{index}")
+            else:
+                continue
             entry = calls.setdefault(call_id, {"id": call_id, "function": {}})
             entry_function = entry["function"]
             if isinstance(function.get("name"), str):
@@ -163,14 +166,86 @@ def _approval(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((event for event in events if event.get("type") == "tool.approval_required"), None)
 
 
-def _denial_response_observed(events: list[dict[str, Any]]) -> bool:
+def _denial_response_observed(events: list[dict[str, Any]], expected_tool_call_id: str) -> bool:
     """Confirm that TrueForge converted the native denial into a denied tool response."""
 
     return any(
         event.get("type") == "tool.response"
+        and event.get("tool_call_id") == expected_tool_call_id
         and "User denied tool call:" in json.dumps(event.get("content", ""))
         for event in events
     )
+
+
+def _runtime_identity(
+    api: _API, session_id: str, expected_model_name: str
+) -> dict[str, str | bool]:
+    """Verify the resolved model and provider from TrueForge's runtime catalog.
+
+    TrueForge 0.1.4 exposes the resolved inline session spec and the live model/provider
+    catalogs, while its public event schema strips the lower-level provider source field.
+    Cross-checking those independent runtime responses prevents the evidence from merely
+    repeating the CLI request or a hard-coded provider URL.
+    """
+
+    session_response = api.call("GET", f"/api/v1/sessions/{session_id}")
+    session_data = session_response.get("data", {}) if isinstance(session_response, dict) else {}
+    agent = session_data.get("agent", {}) if isinstance(session_data, dict) else {}
+    spec = agent.get("spec", {}) if isinstance(agent, dict) else {}
+    model = spec.get("model", {}) if isinstance(spec, dict) else {}
+    resolved_fqn = model.get("name") if isinstance(model, dict) else None
+    if not isinstance(resolved_fqn, str) or not resolved_fqn.startswith("cerebras/"):
+        raise RuntimeError("TrueForge session did not resolve a Cerebras model")
+    observed_model_name = resolved_fqn.removeprefix("cerebras/")
+    if observed_model_name != expected_model_name:
+        raise RuntimeError("TrueForge session resolved a different model than the requested Cerebras model")
+
+    models_response = api.call("GET", "/api/v1/models")
+    model_entries = models_response.get("data", []) if isinstance(models_response, dict) else []
+    catalog_entry = next(
+        (
+            entry
+            for entry in model_entries
+            if isinstance(entry, dict)
+            and entry.get("name") == resolved_fqn
+            and entry.get("model_id") == observed_model_name
+        ),
+        None,
+    )
+    catalog_provider = catalog_entry.get("provider", {}) if isinstance(catalog_entry, dict) else {}
+    if not isinstance(catalog_provider, dict) or catalog_provider.get("name") != "cerebras":
+        raise RuntimeError("TrueForge model catalog did not resolve the session model to Cerebras")
+
+    providers_response = api.call("GET", "/api/v1/settings/model-providers")
+    providers = providers_response.get("data", []) if isinstance(providers_response, dict) else []
+    provider_entry = next(
+        (
+            entry
+            for entry in providers
+            if isinstance(entry, dict) and entry.get("name") == "cerebras"
+        ),
+        None,
+    )
+    manifest = provider_entry.get("manifest", {}) if isinstance(provider_entry, dict) else {}
+    provider_base_url = manifest.get("base_url") if isinstance(manifest, dict) else None
+    configured_models = manifest.get("models", []) if isinstance(manifest, dict) else []
+    configured_model = next(
+        (
+            entry
+            for entry in configured_models
+            if isinstance(entry, dict)
+            and entry.get("model_id") == observed_model_name
+            and entry.get("name") == observed_model_name
+        ),
+        None,
+    )
+    if provider_base_url != PROVIDER_BASE_URL or configured_model is None:
+        raise RuntimeError("TrueForge Cerebras provider configuration did not match the exercised model")
+    return {
+        "model_name": observed_model_name,
+        "provider_base_url": provider_base_url,
+        "runtime_identity_verified": True,
+    }
 
 
 def _write_evidence(path: Path, evidence: dict[str, Any]) -> None:
@@ -194,6 +269,7 @@ def _base_evidence() -> dict[str, Any]:
         "denied_tool_name": "",
         "side_effects_checked": False,
         "side_effects_observed": False,
+        "runtime_identity_verified": False,
     }
 
 
@@ -336,10 +412,10 @@ def run(
         if len(send_refs) != 1:
             raise RuntimeError("TrueForge approval did not identify exactly one send_email call")
         second_send_calls = [call_id for call_id, name in second_calls.items() if name == "send_email"]
+        runtime_identity = _runtime_identity(api, session_id, model_name)
         evidence.update(
             {
-                "model_name": model_name,
-                "provider_base_url": PROVIDER_BASE_URL,
+                **runtime_identity,
                 "serial_tool_loop_executed": (
                     read_completed
                     and len(first_read_calls) == 1
@@ -367,7 +443,9 @@ def run(
         # The denial is proved by TrueForge's denied tool response. The follow-up model
         # completion is not part of the safety boundary and may be rate-limited after
         # TrueForge has already rejected the tool call.
-        evidence["native_denial_executed"] = _denial_response_observed(resume_events)
+        evidence["native_denial_executed"] = _denial_response_observed(
+            resume_events, send_refs[0]["id"]
+        )
         status = server.fixture_state.snapshot()
         evidence["side_effects_checked"] = (
             status["read_only_tool_calls"] == 1
@@ -378,6 +456,7 @@ def run(
             (
                 evidence["model_name"] in SUPPORTED_MODEL_NAMES,
                 evidence["provider_base_url"] == PROVIDER_BASE_URL,
+                evidence["runtime_identity_verified"] is True,
                 evidence["parallel_tool_calls"] is False,
                 evidence["response_format_on_tool_turn"] is False,
                 evidence["serial_tool_loop_executed"] is True,
