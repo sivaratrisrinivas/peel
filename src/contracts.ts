@@ -1,0 +1,227 @@
+export const API_VERSION = "1" as const;
+export const ENGINE_VERSION = "1.0.0" as const;
+export const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+
+export type RunState =
+  | "staged"
+  | "scanned"
+  | "verified"
+  | "awaiting_disclosure_approval"
+  | "disclosing"
+  | "disclosed"
+  | "refused"
+  | "failed"
+  | "delivery_unknown";
+
+export type CommandName =
+  | "stage"
+  | "scan"
+  | "verify"
+  | "request_disclosure"
+  | "respond_disclosure";
+
+export interface ArtifactReference {
+  reference: string;
+  filename: string;
+  media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  byte_size: number;
+  sha256: string;
+}
+
+export interface TriggerIdentity {
+  mailbox_account: string;
+  folder_uidvalidity: string;
+  message_uid: string;
+  attachment_sha256: string;
+}
+
+export interface Envelope {
+  sender: string;
+  recipient: string;
+  subject: string;
+  body: string;
+  attachment: ArtifactReference;
+}
+
+export interface StageCommand {
+  version: typeof API_VERSION;
+  command: "stage";
+  command_id: string;
+  expected_state: "new";
+  trigger: TriggerIdentity;
+  envelope: Envelope;
+}
+
+export interface RunCommandBase {
+  version: typeof API_VERSION;
+  command_id: string;
+  run_id: string;
+  revision: number;
+  artifact_sha256: string;
+}
+
+export interface ScanCommand extends RunCommandBase {
+  command: "scan";
+  expected_state: "staged";
+}
+
+export interface VerifyCommand extends RunCommandBase {
+  command: "verify";
+  expected_state: "scanned";
+}
+
+export interface RequestDisclosureCommand extends RunCommandBase {
+  command: "request_disclosure";
+  expected_state: "verified";
+}
+
+export interface DisclosureBinding {
+  run_id: string;
+  revision: number;
+  envelope_revision_hash: string;
+  artifact_sha256: string;
+  sender: string;
+  recipient: string;
+  subject: string;
+  attachment_filename: string;
+  body_sha256: string;
+}
+
+export interface RespondDisclosureCommand extends RunCommandBase {
+  command: "respond_disclosure";
+  expected_state: "awaiting_disclosure_approval";
+  approval_id: string;
+  idempotency_key: string;
+  decision: "approve" | "deny";
+  binding: DisclosureBinding;
+}
+
+export type Command =
+  | StageCommand
+  | ScanCommand
+  | VerifyCommand
+  | RequestDisclosureCommand
+  | RespondDisclosureCommand;
+
+export interface Finding {
+  mechanism: "hidden_worksheet" | "hidden_row_or_column" | "pivot_cache";
+  location: string;
+  count: number;
+}
+
+export interface EngineScanResult {
+  version: typeof API_VERSION;
+  operation: "scan";
+  status: "clean" | "findings" | "refused";
+  artifact_sha256: string;
+  engine_version: string;
+  supported_profile: "accepted" | "refused";
+  findings: Finding[];
+  refusal_code?: "unsupported_container" | "unsupported_content" | "integrity_failure";
+}
+
+export interface EngineVerifyResult {
+  version: typeof API_VERSION;
+  operation: "verify";
+  status: "verified" | "refused";
+  artifact_sha256: string;
+  original_artifact_sha256: string;
+  engine_version: string;
+  artifact_unchanged: boolean;
+  baseline_sha256: string;
+  remaining_findings: Finding[];
+  refusal_code?: "unsupported_container" | "unsupported_content" | "integrity_failure";
+}
+
+export interface ScanEvidence {
+  status: "clean" | "findings" | "refused";
+  artifact_sha256: string;
+  engine_version: string;
+  finding_count: number;
+  supported_profile: "accepted" | "refused";
+  refusal_code?: string;
+}
+
+export interface VerificationEvidence {
+  status: "verified" | "refused";
+  artifact_sha256: string;
+  engine_version: string;
+  artifact_unchanged: boolean;
+  baseline_sha256: string;
+  remaining_finding_count: number;
+  refusal_code?: string;
+}
+
+export interface DeliveryEvidence {
+  attempt_id: string;
+  idempotency_key: string;
+  status: "denied" | "accepted" | "rejected" | "delivery_unknown";
+  disclosure_fingerprint: string;
+}
+
+export interface RunView {
+  run_id: string;
+  revision: number;
+  state: RunState;
+  envelope_revision_hash: string;
+  artifact: ArtifactReference;
+  scan?: ScanEvidence;
+  verification?: VerificationEvidence;
+  delivery?: DeliveryEvidence;
+}
+
+export interface ApprovalView {
+  approval_id: string;
+  expires_at: string;
+  idempotency_key: string;
+  binding: DisclosureBinding;
+}
+
+export interface SuccessResponse {
+  version: typeof API_VERSION;
+  ok: true;
+  run: RunView;
+  approval?: ApprovalView;
+  deduplicated?: boolean;
+}
+
+export interface ErrorResponse {
+  version: typeof API_VERSION;
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+  };
+  run?: RunView;
+}
+
+export type ApiResponse = SuccessResponse | ErrorResponse;
+
+export interface Clock {
+  now(): number;
+}
+
+export interface ArtifactStore {
+  put(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference;
+  read(reference: ArtifactReference): Uint8Array;
+}
+
+export interface EngineAdapter {
+  scan(reference: ArtifactReference): EngineScanResult;
+  verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult;
+}
+
+export interface DisclosureMessage {
+  sender: string;
+  recipient: string;
+  subject: string;
+  body: string;
+  attachment: ArtifactReference;
+  bytes: Uint8Array;
+}
+
+export type DeliveryOutcome = "accepted" | "rejected" | "ambiguous";
+
+export interface DisclosureMailer {
+  deliver(message: DisclosureMessage, idempotencyKey: string): DeliveryOutcome;
+}

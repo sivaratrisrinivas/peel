@@ -5,11 +5,11 @@ It finds concealed data with deterministic Attacks, proposes an explicit Repair,
 checks the repaired artifact against the original visible content, and releases
 the result only after the required human decisions.
 
-This repository currently holds the architecture, cross-language boundaries,
-and environment gate for the first implementation ticket. The gate had to pass
-before dependent product work could begin. The production daemon and workbook
-engine described below are the planned implementation boundary, not a claim
-that those services already live in this checkout.
+The environment gate had to pass before dependent product work could begin.
+The issue #3 safety kernel is now implemented as a TypeScript daemon with a
+SQLite authority and deterministic fake Artifact, workbook-engine, and mail
+adapters. Live Daytona, mailbox, TrueForge, and SMTP adapters remain later
+integration work; the fake mail adapter never sends external mail.
 
 ## Current status
 
@@ -49,6 +49,23 @@ unchanged.
 The mailbox watcher accepts one unambiguous draft envelope. It identifies the
 attachment and passes an opaque Artifact Reference into the workflow. IMAP and
 SMTP configuration stays outside the engine and orchestration contracts.
+
+The kernel exposes the same versioned command boundary to both HTTP and MCP:
+
+- `POST /v1/artifacts` registers a bounded `.xlsx` byte stream and returns an
+  opaque Artifact Reference.
+- `POST /v1/commands` accepts `stage`, `scan`, `verify`,
+  `request_disclosure`, and `respond_disclosure` commands.
+- `GET /v1/runs/<run-id>` returns bounded Run metadata and evidence.
+- `POST /mcp` exposes the same commands through `initialize`, `tools/list`,
+  and `tools/call`.
+
+Every command is versioned, strict, bound to an expected Run state and
+identity, and consumed once by SQLite. The clean path preserves the original
+artifact hash, records a native-approval-shaped Disclosure decision, and
+requires a fresh approval after denial. The public response never includes
+draft bodies or workbook values; the in-memory fake adapters hold bytes only
+for the active deterministic test Run.
 
 Repair uses targeted ZIP and XML changes. `openpyxl` can inspect a workbook and
 help with reopen checks, but it does not save demo-critical repaired workbooks.
@@ -137,6 +154,15 @@ blocks dependent implementation. Optional cuts must remain visible in the
 report.
 
 ## Tests and checks
+
+The TypeScript kernel requires Node.js 22.5 or newer because it uses the
+built-in `node:sqlite` API:
+
+```bash
+npm install
+npm run typecheck
+npm test
+```
 
 Run the deterministic checks without loading unrelated host pytest plugins:
 

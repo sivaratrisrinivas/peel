@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peel.local/schemas/daemon-command.schema.json",
+  "title": "Peel daemon command",
+  "oneOf": [
+    { "$ref": "#/$defs/stage" },
+    { "$ref": "#/$defs/runCommand" },
+    { "$ref": "#/$defs/respondDisclosure" }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "filename", "media_type", "byte_size", "sha256"],
+      "properties": {
+        "reference": { "type": "string", "pattern": "^peel-artifact-[A-Za-z0-9_-]{22}$" },
+        "filename": { "type": "string", "pattern": "^[^\\\\/]+\\.xlsx$" },
+        "media_type": { "const": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+        "byte_size": { "type": "integer", "minimum": 0, "maximum": 10485760 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mailbox_account", "folder_uidvalidity", "message_uid", "attachment_sha256"],
+      "properties": {
+        "mailbox_account": { "type": "string", "minLength": 1 },
+        "folder_uidvalidity": { "type": "string", "minLength": 1 },
+        "message_uid": { "type": "string", "minLength": 1 },
+        "attachment_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sender", "recipient", "subject", "body", "attachment"],
+      "properties": {
+        "sender": { "type": "string", "minLength": 1 },
+        "recipient": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "body": { "type": "string", "minLength": 1 },
+        "attachment": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256"],
+      "properties": {
+        "version": { "const": "1" },
+        "command": { "enum": ["scan", "verify", "request_disclosure"] },
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "expected_state": { "enum": ["staged", "scanned", "verified"] },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "command", "command_id", "expected_state", "trigger", "envelope"],
+      "properties": {
+        "version": { "const": "1" },
+        "command": { "const": "stage" },
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "expected_state": { "const": "new" },
+        "trigger": { "$ref": "#/$defs/trigger" },
+        "envelope": { "$ref": "#/$defs/envelope" }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "revision", "envelope_revision_hash", "artifact_sha256", "sender", "recipient", "subject", "attachment_filename", "body_sha256"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "envelope_revision_hash": { "$ref": "#/$defs/sha256" },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "sender": { "type": "string", "minLength": 1 },
+        "recipient": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "attachment_filename": { "type": "string", "minLength": 1 },
+        "body_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "runCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        { "if": { "properties": { "command": { "const": "scan" } } }, "then": { "properties": { "expected_state": { "const": "staged" } } } },
+        { "if": { "properties": { "command": { "const": "verify" } } }, "then": { "properties": { "expected_state": { "const": "scanned" } } } },
+        { "if": { "properties": { "command": { "const": "request_disclosure" } } }, "then": { "properties": { "expected_state": { "const": "verified" } } } }
+      ]
+    },
+    "respondDisclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "decision", "binding"],
+      "properties": {
+        "version": { "const": "1" },
+        "command": { "const": "respond_disclosure" },
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "expected_state": { "const": "awaiting_disclosure_approval" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "approval_id": { "$ref": "#/$defs/uuid" },
+        "idempotency_key": { "$ref": "#/$defs/uuid" },
+        "decision": { "enum": ["approve", "deny"] },
+        "binding": { "$ref": "#/$defs/binding" }
+      }
+    }
+  }
+}

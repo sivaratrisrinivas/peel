@@ -6,3 +6,6 @@ __pycache__/
 *.py[cod]
 *-evidence.json
 .venv/
+.peel/
+dist/
+node_modules/

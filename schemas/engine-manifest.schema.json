@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peel.local/schemas/engine-manifest.schema.json",
+  "title": "Peel engine manifest",
+  "oneOf": [
+    { "$ref": "#/$defs/scan" },
+    { "$ref": "#/$defs/verify" }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "location", "count"],
+      "properties": {
+        "mechanism": { "enum": ["hidden_worksheet", "hidden_row_or_column", "pivot_cache"] },
+        "location": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "operation", "status", "artifact_sha256", "engine_version", "supported_profile", "findings"],
+      "properties": {
+        "version": { "const": "1" },
+        "operation": { "const": "scan" },
+        "status": { "enum": ["clean", "findings", "refused"] },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "supported_profile": { "enum": ["accepted", "refused"] },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "refusal_code": { "enum": ["unsupported_container", "unsupported_content", "integrity_failure"] }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "operation", "status", "artifact_sha256", "original_artifact_sha256", "engine_version", "artifact_unchanged", "baseline_sha256", "remaining_findings"],
+      "properties": {
+        "version": { "const": "1" },
+        "operation": { "const": "verify" },
+        "status": { "enum": ["verified", "refused"] },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "original_artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "artifact_unchanged": { "type": "boolean" },
+        "baseline_sha256": { "$ref": "#/$defs/sha256" },
+        "remaining_findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "refusal_code": { "enum": ["unsupported_container", "unsupported_content", "integrity_failure"] }
+      }
+    }
+  }
+}

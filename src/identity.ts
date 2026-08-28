@@ -1,0 +1,92 @@
+import { createHash, randomUUID } from "node:crypto";
+
+import type {
+  DisclosureBinding,
+  Envelope,
+  TriggerIdentity,
+} from "./contracts.js";
+
+export function newId(): string {
+  return randomUUID();
+}
+
+export function sha256(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export function canonicalJson(value: unknown): string {
+  const encoded = JSON.stringify(sortObject(value));
+  if (encoded === undefined) throw new TypeError("value cannot be represented as canonical JSON");
+  return encoded;
+}
+
+function sortObject(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortObject);
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record)
+        .sort()
+        .map((key) => [key, sortObject(record[key])]),
+    );
+  }
+  return value;
+}
+
+export function envelopeRevisionHash(envelope: Envelope): string {
+  return sha256(
+    canonicalJson({
+      sender: envelope.sender,
+      recipient: envelope.recipient,
+      subject: envelope.subject,
+      body: envelope.body,
+      attachment: {
+        filename: envelope.attachment.filename,
+        sha256: envelope.attachment.sha256,
+        byte_size: envelope.attachment.byte_size,
+      },
+    }),
+  );
+}
+
+export function bodyHash(envelope: Envelope): string {
+  return sha256(envelope.body);
+}
+
+export function runKey(trigger: TriggerIdentity): string {
+  return sha256(canonicalJson(trigger));
+}
+
+export function disclosureFingerprint(
+  artifactSha256: string,
+  envelope: Envelope,
+): string {
+  return sha256(
+    canonicalJson({
+      artifact_sha256: artifactSha256,
+      recipient: envelope.recipient,
+      subject: envelope.subject,
+      body: envelope.body,
+    }),
+  );
+}
+
+export function disclosureBinding(
+  runId: string,
+  revision: number,
+  envelopeRevision: string,
+  artifactSha256: string,
+  envelope: Envelope,
+): DisclosureBinding {
+  return {
+    run_id: runId,
+    revision,
+    envelope_revision_hash: envelopeRevision,
+    artifact_sha256: artifactSha256,
+    sender: envelope.sender,
+    recipient: envelope.recipient,
+    subject: envelope.subject,
+    attachment_filename: envelope.attachment.filename,
+    body_sha256: bodyHash(envelope),
+  };
+}
