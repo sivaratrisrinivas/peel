@@ -18,7 +18,9 @@ from scripts import mail_gate_probe
 SCRIPT = ROOT / "scripts" / "environment_gate.py"
 
 
-def run_gate(*arguments: str, extra_environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_gate(
+    *arguments: str, extra_environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(extra_environment or {})
     return subprocess.run(
@@ -156,7 +158,18 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
         if any("pulls/11/reviews" in item for item in command):
             return True, '{"login":"qodo-code-review[bot]","state":"COMMENTED","commit_id":"abc123"}\n', ""
         if any("issues/11/comments" in item for item in command):
-            return True, '{"body":"<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123"}\n', ""
+            return True, json.dumps(
+                {
+                    "id": 1,
+                    "created_at": "2026-08-28T01:00:00Z",
+                    "updated_at": "2026-08-28T01:00:00Z",
+                    "login": "qodo-code-review[bot]",
+                    "body": (
+                        "<h3>Code Review by Qodo</h3>"
+                        "<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123"
+                    ),
+                }
+            ) + "\n", ""
         raise AssertionError(command)
 
     def run(command, **kwargs):
@@ -178,13 +191,34 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
 
 def test_qodo_findings_must_be_resolved_for_target_commit() -> None:
     resolved = [
-        {"body": '<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123'}
+        {
+            "id": 1,
+            "created_at": "2026-08-28T01:00:00Z",
+            "updated_at": "2026-08-28T01:00:00Z",
+            "login": "qodo-code-review[bot]",
+            "body": (
+                "<h3>Code Review by Qodo</h3>"
+                "<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123"
+            ),
+        }
     ]
-    unresolved = [{"body": "<summary>  1.  Finding <code>🐞 Bug</code></summary> abc123"}]
+    unresolved = [
+        {
+            "id": 2,
+            "created_at": "2026-08-28T02:00:00Z",
+            "updated_at": "2026-08-28T02:00:00Z",
+            "login": "qodo-code-review[bot]",
+            "body": (
+                "<h3>Code Review by Qodo</h3>"
+                "<summary>  1.  Finding <code>🐞 Bug</code></summary> abc123"
+            ),
+        }
+    ]
 
     assert environment_gate._qodo_findings_resolved(resolved, "abc123") is True
     assert environment_gate._qodo_findings_resolved(unresolved, "abc123") is False
     assert environment_gate._qodo_findings_resolved(resolved, "other-commit") is False
+    assert environment_gate._qodo_findings_resolved(resolved + unresolved, "abc123") is False
 
 
 def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: Path) -> None:

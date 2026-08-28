@@ -189,17 +189,33 @@ def _env_present(names: Sequence[str]) -> bool:
 
 
 def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool:
-    """Require a Qodo review body for the target commit with no open numbered findings."""
+    """Require the newest canonical Qodo review for the target commit to be resolved."""
 
     finding_summaries = re.compile(r"<summary>\s+\d+\.\s+.*?</summary>", re.DOTALL)
+    candidates: list[tuple[str, int, list[str]]] = []
     for comment in comments:
+        login = comment.get("login")
         body = comment.get("body")
-        if not isinstance(body, str) or commit not in body:
+        if (
+            not isinstance(login, str)
+            or "qodo" not in login.lower()
+            or not isinstance(body, str)
+            or "<h3>Code Review by Qodo</h3>" not in body
+            or commit not in body
+        ):
             continue
         summaries = finding_summaries.findall(body)
-        if summaries and all("✓ Resolved" in summary for summary in summaries):
-            return True
-    return False
+        if not summaries:
+            continue
+        timestamp = comment.get("updated_at") or comment.get("created_at")
+        if not isinstance(timestamp, str):
+            timestamp = ""
+        comment_id = comment.get("id")
+        candidates.append((timestamp, comment_id if isinstance(comment_id, int) else -1, summaries))
+    if not candidates:
+        return False
+    _, _, latest_summaries = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+    return all("✓ Resolved" in summary for summary in latest_summaries)
 
 
 def _probe_github_qodo(
@@ -354,7 +370,10 @@ def _probe_github_qodo(
             f"repos/{repo}/issues/{pull_request_number}/comments",
             "--paginate",
             "--jq",
-            ".[] | select(.user.login | ascii_downcase | contains(\"qodo\")) | {body:.body}",
+            (
+                ".[] | select(.user.login | ascii_downcase | contains(\"qodo\")) | "
+                "{id,created_at,updated_at,login:.user.login,body:.body}"
+            ),
         ],
         timeout=15,
     )
@@ -378,7 +397,10 @@ def _probe_github_qodo(
         )
     ) else "fail"
     summary = (
-        "Public repository, target pull request, current commit, and fully resolved Qodo review evidence verified."
+        (
+            "Public repository, target pull request, current commit, and fully resolved "
+            "Qodo review evidence verified."
+        )
         if status == "pass"
         else "Public repository was reachable, but target-commit Qodo review evidence was incomplete."
     )
@@ -430,7 +452,10 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
         "pass" if passed else "fail",
         "Serial TrueForge/Cerebras execution and denied native approval were verified with zero side effects."
         if passed
-        else "The serial TrueForge/Cerebras tool loop and denied native approval were not proved in this environment.",
+        else (
+            "The serial TrueForge/Cerebras tool loop and denied native approval were not "
+            "proved in this environment."
+        ),
         evidence,
     )
 
@@ -584,7 +609,10 @@ def _probe_host() -> dict[str, Any]:
         name: _module_present(name)
         for name in ("pytest", "openpyxl", "xlsxwriter", "uno", "cerebras.cloud.sdk")
     }
-    commands = {name: _command_path(name) is not None for name in ("node", "npm", "bun", "daytona", "libreoffice")}
+    commands = {
+        name: _command_path(name) is not None
+        for name in ("node", "npm", "bun", "daytona", "libreoffice")
+    }
     return _gate(
         "host_baseline",
         False,
