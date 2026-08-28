@@ -2,12 +2,18 @@
 
 The environment gate accepts mandatory integration evidence only from versioned JSON records produced by an explicit live probe. Credentials, message bodies, workbook values, command output, and sandbox paths must not be copied into a record.
 
-Set these local, ignored variables before running the gate:
+Set these local, ignored variables before running the gate. The final live run also supplies the target PR with `--pull-request`; the gate verifies that PR is open at the current checkout commit and has a fully resolved Qodo review for that exact commit.
 
 ```text
 PEEL_TRUEFORGE_EVIDENCE_FILE=/tmp/peel-trueforge-evidence.json
 PEEL_DAYTONA_EVIDENCE_FILE=/tmp/peel-daytona-evidence.json
 PEEL_MAIL_EVIDENCE_FILE=/tmp/peel-mail-evidence.json
+```
+
+For the GitHub/Qodo portion of the live gate, run from the checkout under review:
+
+```bash
+python3 scripts/environment_gate.py --pull-request 11 --format json
 ```
 
 Each record must contain `schema_version: "1"` and a matching `probe` name. Missing, malformed, or unversioned records fail closed.

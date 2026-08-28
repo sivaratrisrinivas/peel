@@ -64,6 +64,24 @@ def _command_path(name: str) -> str | None:
     )
 
 
+def _git_head(root: Path) -> str | None:
+    """Return the current checkout commit without exposing command output in reports."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40}", commit) else None
+
+
 def _module_present(name: str) -> bool:
     """Return module availability without turning a missing parent into a crash."""
 
@@ -170,7 +188,26 @@ def _env_present(names: Sequence[str]) -> bool:
     return all(bool(os.environ.get(name)) for name in names)
 
 
-def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
+def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool:
+    """Require a Qodo review body for the target commit with no open numbered findings."""
+
+    finding_summaries = re.compile(r"<summary>\s+\d+\.\s+.*?</summary>", re.DOTALL)
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str) or commit not in body:
+            continue
+        summaries = finding_summaries.findall(body)
+        if summaries and all("✓ Resolved" in summary for summary in summaries):
+            return True
+    return False
+
+
+def _probe_github_qodo(
+    repo: str,
+    offline: bool,
+    pull_request_number: int | None = None,
+    expected_commit: str | None = None,
+) -> dict[str, Any]:
     gh_path = _command_path("gh")
     evidence: dict[str, Any] = {
         "repo": repo,
@@ -178,7 +215,12 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
         "gh_available": gh_path is not None,
         "authenticated": False,
         "public_repo": False,
+        "pull_request_number": pull_request_number,
+        "pull_request_open": False,
+        "head_commit_verified": False,
         "qodo_review_found": False,
+        "qodo_review_commit_verified": False,
+        "qodo_findings_resolved": False,
     }
 
     if offline:
@@ -233,68 +275,112 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
             evidence,
         )
 
-    try:
-        result = subprocess.run(
-            [
-                gh_path,
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "all",
-                "--limit",
-                "100",
-                "--json",
-                "number",
-                "--jq",
-                ".[].number",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        result = None
-
-    if result is None or result.returncode != 0:
+    if pull_request_number is None or expected_commit is None:
         return _gate(
             "github_qodo",
             True,
             "fail",
-            "Pull-request review evidence could not be fetched.",
+            "A target pull request and current checkout commit are required for reproducible Qodo evidence.",
             evidence,
         )
 
-    for line in result.stdout.splitlines():
-        try:
-            pull_request = int(line.strip())
-        except ValueError:
-            continue
-        reviewed, review_output, _ = _capture(
-            [
-                gh_path,
-                "api",
-                f"repos/{repo}/pulls/{pull_request}/reviews",
-                "--jq",
-                ".[]?.user.login",
-            ],
-            timeout=15,
+    pr_probe, pr_output, _ = _capture(
+        [
+            gh_path,
+            "api",
+            f"repos/{repo}/pulls/{pull_request_number}",
+            "--jq",
+            "{number,state,head_sha:.head.sha}",
+        ],
+        timeout=15,
+    )
+    try:
+        pull_request = json.loads(pr_output) if pr_probe else {}
+    except json.JSONDecodeError:
+        pull_request = {}
+    evidence["pull_request_open"] = (
+        isinstance(pull_request, dict)
+        and pull_request.get("number") == pull_request_number
+        and pull_request.get("state") == "open"
+    )
+    evidence["head_commit_verified"] = (
+        evidence["pull_request_open"] and pull_request.get("head_sha") == expected_commit
+    )
+    if not evidence["head_commit_verified"]:
+        return _gate(
+            "github_qodo",
+            True,
+            "fail",
+            "The target pull request is not open at the current checkout commit.",
+            evidence,
         )
-        if reviewed:
-            # A successful API call alone is not Qodo evidence. The actual
-            # reviewer identity is intentionally not emitted, but this probe
-            # only passes when the review response contains a Qodo identity.
-            if any("qodo" in login.lower() for login in review_output.splitlines()):
-                evidence["qodo_review_found"] = True
-                break
 
-    status = "pass" if evidence["qodo_review_found"] else "fail"
+    reviewed, review_output, _ = _capture(
+        [
+            gh_path,
+            "api",
+            f"repos/{repo}/pulls/{pull_request_number}/reviews",
+            "--paginate",
+            "--jq",
+            ".[] | {login:.user.login,state,commit_id}",
+        ],
+        timeout=15,
+    )
+    review_records: list[dict[str, Any]] = []
+    if reviewed:
+        for line in review_output.splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                review_records.append(record)
+    qodo_reviews = [
+        record
+        for record in review_records
+        if isinstance(record.get("login"), str) and "qodo" in record["login"].lower()
+    ]
+    evidence["qodo_review_found"] = bool(qodo_reviews)
+    evidence["qodo_review_commit_verified"] = any(
+        record.get("commit_id") == expected_commit
+        and record.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+        for record in qodo_reviews
+    )
+
+    comments_ok, comments_output, _ = _capture(
+        [
+            gh_path,
+            "api",
+            f"repos/{repo}/issues/{pull_request_number}/comments",
+            "--paginate",
+            "--jq",
+            ".[] | select(.user.login | ascii_downcase | contains(\"qodo\")) | {body:.body}",
+        ],
+        timeout=15,
+    )
+    comments: list[dict[str, Any]] = []
+    if comments_ok:
+        for line in comments_output.splitlines():
+            try:
+                comment = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(comment, dict):
+                comments.append(comment)
+    evidence["qodo_findings_resolved"] = _qodo_findings_resolved(comments, expected_commit)
+
+    status = "pass" if all(
+        evidence[key]
+        for key in (
+            "qodo_review_found",
+            "qodo_review_commit_verified",
+            "qodo_findings_resolved",
+        )
+    ) else "fail"
     summary = (
-        "Public repository and Qodo review evidence verified."
+        "Public repository, target pull request, current commit, and fully resolved Qodo review evidence verified."
         if status == "pass"
-        else "Public repository was reachable, but no Qodo review evidence was found."
+        else "Public repository was reachable, but target-commit Qodo review evidence was incomplete."
     )
     return _gate("github_qodo", True, status, summary, evidence)
 
@@ -512,9 +598,12 @@ def _probe_host() -> dict[str, Any]:
     )
 
 
-def build_report(root: Path, repo: str, offline: bool) -> dict[str, Any]:
+def build_report(
+    root: Path, repo: str, offline: bool, pull_request_number: int | None = None
+) -> dict[str, Any]:
+    expected_commit = _git_head(root)
     gates = [
-        _probe_github_qodo(repo, offline),
+        _probe_github_qodo(repo, offline, pull_request_number, expected_commit),
         _probe_trueforge_cerebras(),
         _probe_daytona(),
         _probe_owned_mail(),
@@ -570,6 +659,12 @@ def _markdown(report: dict[str, Any]) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=REPO_DEFAULT)
+    parser.add_argument(
+        "--pull-request",
+        type=int,
+        default=None,
+        help="target pull request number for exact current-commit Qodo verification",
+    )
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument(
         "--offline",
@@ -579,7 +674,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-    report = build_report(Path(__file__).resolve().parents[1], args.repo, args.offline)
+    pull_request_number = args.pull_request
+    if pull_request_number is None and os.environ.get("PEEL_GITHUB_PR_NUMBER"):
+        try:
+            pull_request_number = int(os.environ["PEEL_GITHUB_PR_NUMBER"])
+        except ValueError:
+            pull_request_number = None
+    report = build_report(
+        Path(__file__).resolve().parents[1], args.repo, args.offline, pull_request_number
+    )
     output = json.dumps(report, indent=2, sort_keys=True) if args.format == "json" else _markdown(report)
     print(output)
     return 0 if report["decision"] == "GO" else 2

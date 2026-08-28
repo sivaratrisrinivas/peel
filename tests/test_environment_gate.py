@@ -149,8 +149,14 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
             return True, "", ""
         if command[1:3] == ["api", "repos/sivaratrisrinivas/peel"]:
             return True, "false\n", ""
-        if any("pulls/1/reviews" in item for item in command):
-            return True, "qodo-code-review[bot]\n", ""
+        if any("pulls/11" in item for item in command) and not any(
+            "reviews" in item for item in command
+        ):
+            return True, '{"number":11,"state":"open","head_sha":"abc123"}\n', ""
+        if any("pulls/11/reviews" in item for item in command):
+            return True, '{"login":"qodo-code-review[bot]","state":"COMMENTED","commit_id":"abc123"}\n', ""
+        if any("issues/11/comments" in item for item in command):
+            return True, '{"body":"<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123"}\n', ""
         raise AssertionError(command)
 
     def run(command, **kwargs):
@@ -161,11 +167,24 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
     monkeypatch.setattr(environment_gate, "_capture", capture)
     monkeypatch.setattr(environment_gate.subprocess, "run", run)
 
-    gate = environment_gate._probe_github_qodo("sivaratrisrinivas/peel", offline=False)
+    gate = environment_gate._probe_github_qodo(
+        "sivaratrisrinivas/peel", offline=False, pull_request_number=11, expected_commit="abc123"
+    )
 
     assert gate["status"] == "pass"
     assert calls
     assert all(command[0] == "/opt/tools/gh" for command in calls)
+
+
+def test_qodo_findings_must_be_resolved_for_target_commit() -> None:
+    resolved = [
+        {"body": '<summary>  1.  Finding <code>✓ Resolved</code></summary> abc123'}
+    ]
+    unresolved = [{"body": "<summary>  1.  Finding <code>🐞 Bug</code></summary> abc123"}]
+
+    assert environment_gate._qodo_findings_resolved(resolved, "abc123") is True
+    assert environment_gate._qodo_findings_resolved(unresolved, "abc123") is False
+    assert environment_gate._qodo_findings_resolved(resolved, "other-commit") is False
 
 
 def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: Path) -> None:

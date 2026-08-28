@@ -1,7 +1,7 @@
 # Peel environment gate — final live record
 
 - Date: 2026-08-28
-- Source commit: `29c1046`
+- Verification target: PR #11 at the exact checkout commit accepted by the gate
 - Decision: `GO`
 - Mode: live
 
@@ -9,7 +9,7 @@ All mandatory gates passed with bounded, locally generated evidence. No credenti
 
 | Gate | Result | Bounded proof |
 | --- | --- | --- |
-| GitHub and Qodo | Pass | Public repository access and the final Qodo review for PR #11 commit `29c1046` were verified; all findings are resolved. |
+| GitHub and Qodo | Pass | Public repository access, the exact target PR/checkout commit, a Qodo review on that commit, and fully resolved findings were verified. |
 | TrueForge and Cerebras | Pass | Configured `gemma-4-31b` completed the serial read-only tool loop, native `send_email` approval denial, runtime identity cross-check, and zero-side-effect check. |
 | Daytona | Pass | Fresh sandbox creation, sentinel upload, declared hash command, hash-verified download, and destruction completed. |
 | Owned mail | Pass | Strict Gmail draft envelope retrieval and one owned-recipient SMTP delivery completed. |
