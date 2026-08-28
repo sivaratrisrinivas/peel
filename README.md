@@ -64,6 +64,11 @@ TrueForge/MCP responses, SQLite, or persistent reports.
 
 ## Current status
 
+Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
+suspicious hidden worksheets, missing context, scope mismatch, model failure,
+private Reveal expiry, and visible refusal. The default path keeps Reveal off,
+and a refused Run has no Repair or Disclosure path.
+
 Issue #2 is complete. The final live gate passed on 2026-08-28 at commit
 `d4a9342187a74d6f686442bccc2a665e110ce4e`.
 
