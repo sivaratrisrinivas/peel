@@ -205,8 +205,6 @@ def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool
         ):
             continue
         summaries = finding_summaries.findall(body)
-        if not summaries:
-            continue
         timestamp = comment.get("updated_at") or comment.get("created_at")
         if not isinstance(timestamp, str):
             timestamp = ""

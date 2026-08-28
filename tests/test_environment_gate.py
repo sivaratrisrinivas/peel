@@ -214,11 +214,22 @@ def test_qodo_findings_must_be_resolved_for_target_commit() -> None:
             ),
         }
     ]
+    clean = [
+        {
+            "id": 3,
+            "created_at": "2026-08-28T03:00:00Z",
+            "updated_at": "2026-08-28T03:00:00Z",
+            "login": "qodo-code-review[bot]",
+            "body": "<h3>Code Review by Qodo</h3> abc123",
+        }
+    ]
 
     assert environment_gate._qodo_findings_resolved(resolved, "abc123") is True
     assert environment_gate._qodo_findings_resolved(unresolved, "abc123") is False
     assert environment_gate._qodo_findings_resolved(resolved, "other-commit") is False
     assert environment_gate._qodo_findings_resolved(resolved + unresolved, "abc123") is False
+    assert environment_gate._qodo_findings_resolved(clean, "abc123") is True
+    assert environment_gate._qodo_findings_resolved(unresolved + clean, "abc123") is True
 
 
 def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: Path) -> None:
