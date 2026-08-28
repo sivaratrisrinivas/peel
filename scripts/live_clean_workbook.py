@@ -582,7 +582,7 @@ def _matching_recipient_messages(
             raise LiveFailure("recipient_mailbox_login_failed")
         if client.select(mailbox, readonly=True)[0] != "OK":
             raise LiveFailure("recipient_mailbox_select_failed")
-        search_status, data = client.uid("search", None, "ALL")
+        search_status, data = client.uid("search", "ALL")
         if search_status != "OK" or not data or not data[0]:
             return 0
         for message_id in data[0].split()[-100:]:

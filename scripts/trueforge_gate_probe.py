@@ -82,6 +82,7 @@ class _API:
                 except ValueError:
                     delay = min(60, 15 * (2**attempt))
                 time.sleep(delay)
+        raise RuntimeError("TrueForge turn retry loop exhausted")
 
 
 def _rate_limited_without_tool_activity(events: list[dict[str, Any]]) -> bool:

@@ -182,7 +182,7 @@ def _retrieve_eligible_draft() -> RetrievedDraft | None:
         if select_status != "OK":
             return None
         folder_uidvalidity = _uidvalidity(client)
-        search_status, data = client.uid("search", None, "ALL")
+        search_status, data = client.uid("search", "ALL")
         if search_status != "OK" or not data or not data[0]:
             return None
         message_ids = data[0].split()
