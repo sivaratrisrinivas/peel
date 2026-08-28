@@ -83,9 +83,7 @@ def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None =
     body_parts = []
     for part in message.walk():
         filename = part.get_filename() or ""
-        if part.get_content_maintype() != "multipart" and (
-            part.get_content_disposition() == "attachment" or filename
-        ):
+        if part.get_content_disposition() == "attachment" or filename:
             attachment_parts.append(filename)
         if part.get_content_type() == "text/plain" and part.get_content_disposition() != "attachment":
             try:

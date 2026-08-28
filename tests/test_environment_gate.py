@@ -249,6 +249,16 @@ def test_mail_probe_accepts_only_the_required_draft_envelope(monkeypatch) -> Non
 
     assert mail_gate_probe._draft_envelope_valid(message) is True
 
+    nested_attachment = mail_gate_probe.EmailMessage()
+    nested_attachment.set_content("nested attachment")
+    nested_attachment.make_mixed()
+    nested_attachment.add_attachment(
+        b"nested bytes", maintype="application", subtype="octet-stream"
+    )
+    nested_attachment["Content-Disposition"] = 'attachment; filename="nested.bin"'
+    message.attach(nested_attachment)
+    assert mail_gate_probe._draft_envelope_valid(message) is False
+
     message.add_attachment(b"second", maintype="application", subtype="pdf", filename="other.pdf")
     assert mail_gate_probe._draft_envelope_valid(message) is False
 
