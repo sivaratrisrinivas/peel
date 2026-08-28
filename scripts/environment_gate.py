@@ -14,6 +14,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +63,76 @@ def _command_path(name: str) -> str | None:
     )
 
 
+def _module_present(name: str) -> bool:
+    """Return module availability without turning a missing parent into a crash."""
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _load_dotenv(path: Path) -> None:
+    """Load simple dotenv entries without executing the file as shell code."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
+
+
+def _read_probe_evidence(environment_name: str, expected_probe: str) -> dict[str, Any]:
+    """Read a bounded, locally generated live-proof record without exposing its contents."""
+
+    path_value = os.environ.get(environment_name)
+    if not path_value:
+        return {}
+    try:
+        raw = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema_version") != SCHEMA_VERSION
+        or raw.get("probe") != expected_probe
+    ):
+        return {}
+    return raw
+
+
+def _evidence_bool(evidence: dict[str, Any], name: str) -> bool:
+    """Accept only literal booleans from a live-proof record."""
+
+    return evidence.get(name) is True
+
+
+def _evidence_false(evidence: dict[str, Any], name: str) -> bool:
+    """Require an explicit false value for a negative safety assertion."""
+
+    return evidence.get(name) is False
+
+
+def _evidence_string(evidence: dict[str, Any], name: str) -> str | None:
+    """Accept only strings from a live-proof record; never echo the value in reports."""
+
+    value = evidence.get(name)
+    return value if isinstance(value, str) else None
+
+
 def _gate(
     name: str,
     mandatory: bool,
@@ -85,10 +156,11 @@ def _env_present(names: Sequence[str]) -> bool:
 
 
 def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
+    gh_path = _command_path("gh")
     evidence: dict[str, Any] = {
         "repo": repo,
         "offline": offline,
-        "gh_available": _command_path("gh") is not None,
+        "gh_available": gh_path is not None,
         "authenticated": False,
         "public_repo": False,
         "qodo_review_found": False,
@@ -111,7 +183,16 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
             evidence,
         )
 
-    authenticated, auth_stdout, auth_stderr = _capture(["gh", "auth", "status"])
+    if gh_path is None:
+        return _gate(
+            "github_qodo",
+            True,
+            "fail",
+            "GitHub CLI is unavailable, so Qodo access and review cannot be proved.",
+            evidence,
+        )
+
+    authenticated, auth_stdout, auth_stderr = _capture([gh_path, "auth", "status"])
     auth_output = f"{auth_stdout}\n{auth_stderr}".lower()
     authenticated = authenticated and not any(
         marker in auth_output
@@ -127,7 +208,7 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
             evidence,
         )
 
-    public_probe, public_value, _ = _capture(["gh", "api", f"repos/{repo}", "--jq", ".private"])
+    public_probe, public_value, _ = _capture([gh_path, "api", f"repos/{repo}", "--jq", ".private"])
     public_repo = public_probe and public_value.strip() == "false"
     evidence["public_repo"] = public_repo
     if not public_repo:
@@ -142,7 +223,7 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
     try:
         result = subprocess.run(
             [
-                "gh",
+                gh_path,
                 "pr",
                 "list",
                 "--repo",
@@ -180,7 +261,7 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
             continue
         reviewed, review_output, _ = _capture(
             [
-                "gh",
+                gh_path,
                 "api",
                 f"repos/{repo}/pulls/{pull_request}/reviews",
                 "--jq",
@@ -207,21 +288,48 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
 
 def _probe_trueforge_cerebras() -> dict[str, Any]:
     credentials = _env_present(("CEREBRAS_API_KEY", "TRUEFORGE_API_KEY"))
-    adapter = any(_command_path(command) for command in ("trueforge", "cerebras"))
-    sdk_present = importlib.util.find_spec("cerebras.cloud.sdk") is not None
+    adapter = any(_command_path(command) for command in ("trueforge", "cerebras", "npx"))
+    sdk_present = _module_present("cerebras.cloud.sdk")
+    proof = _read_probe_evidence("PEEL_TRUEFORGE_EVIDENCE_FILE", "trueforge_cerebras")
+    required_proof = {
+        "serial_tool_loop_executed": _evidence_bool(proof, "serial_tool_loop_executed"),
+        "native_denial_executed": _evidence_bool(proof, "native_denial_executed"),
+        "denied_tool_name": _evidence_string(proof, "denied_tool_name") == "send_email",
+        "side_effects_checked": _evidence_bool(proof, "side_effects_checked"),
+        "side_effects_observed": _evidence_bool(proof, "side_effects_observed"),
+        "parallel_tool_calls": proof.get("parallel_tool_calls") is False,
+        "response_format_on_tool_turn": _evidence_bool(proof, "response_format_on_tool_turn"),
+        "model_name": _evidence_string(proof, "model_name") == "gpt-oss-120b",
+        "provider_base_url": _evidence_string(proof, "provider_base_url") == "https://api.cerebras.ai/v1",
+    }
     evidence = {
         "credentials_present": credentials,
         "runtime_adapter_present": adapter,
         "cerebras_sdk_present": sdk_present,
-        "serial_tool_loop_executed": False,
-        "native_denial_executed": False,
-        "side_effects_observed": False,
+        "evidence_file_present": bool(proof),
+        **required_proof,
     }
+    passed = (
+        credentials
+        and adapter
+        and sdk_present
+        and required_proof["serial_tool_loop_executed"]
+        and required_proof["native_denial_executed"]
+        and required_proof["denied_tool_name"]
+        and required_proof["side_effects_checked"]
+        and _evidence_false(proof, "side_effects_observed")
+        and required_proof["parallel_tool_calls"]
+        and _evidence_false(proof, "response_format_on_tool_turn")
+        and required_proof["model_name"]
+        and required_proof["provider_base_url"]
+    )
     return _gate(
         "trueforge_cerebras",
         True,
-        "fail",
-        "The serial TrueForge/Cerebras tool loop and denied native approval were not proved in this environment.",
+        "pass" if passed else "fail",
+        "Serial TrueForge/Cerebras execution and denied native approval were verified with zero side effects."
+        if passed
+        else "The serial TrueForge/Cerebras tool loop and denied native approval were not proved in this environment.",
         evidence,
     )
 
@@ -230,21 +338,29 @@ def _probe_daytona() -> dict[str, Any]:
     cli_path = _command_path("daytona")
     credentials = _env_present(("DAYTONA_API_KEY",))
     version_probe_succeeded = _run([cli_path, "version"]) if cli_path else False
+    proof = _read_probe_evidence("PEEL_DAYTONA_EVIDENCE_FILE", "daytona")
+    required_proof = {
+        "sandbox_created": _evidence_bool(proof, "sandbox_created"),
+        "attachment_uploaded": _evidence_bool(proof, "attachment_uploaded"),
+        "declared_command_executed": _evidence_bool(proof, "declared_command_executed"),
+        "artifact_hash_verified": _evidence_bool(proof, "artifact_hash_verified"),
+        "sandbox_destroyed": _evidence_bool(proof, "sandbox_destroyed"),
+    }
     evidence = {
         "cli_present": cli_path is not None,
         "version_probe_succeeded": version_probe_succeeded,
         "credentials_present": credentials,
-        "sandbox_created": False,
-        "attachment_uploaded": False,
-        "declared_command_executed": False,
-        "artifact_hash_verified": False,
-        "sandbox_destroyed": False,
+        "evidence_file_present": bool(proof),
+        **required_proof,
     }
+    passed = credentials and version_probe_succeeded and all(required_proof.values())
     return _gate(
         "daytona",
         True,
-        "fail",
-        "Fresh Daytona execution and artifact custody were not proved in this environment.",
+        "pass" if passed else "fail",
+        "Fresh Daytona execution and artifact custody were verified."
+        if passed
+        else "Fresh Daytona execution and artifact custody were not proved in this environment.",
         evidence,
     )
 
@@ -252,18 +368,32 @@ def _probe_daytona() -> dict[str, Any]:
 def _probe_owned_mail() -> dict[str, Any]:
     imap_configured = _env_present(("IMAP_HOST", "IMAP_USERNAME", "IMAP_PASSWORD"))
     smtp_configured = _env_present(("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"))
+    proof = _read_probe_evidence("PEEL_MAIL_EVIDENCE_FILE", "owned_mail")
+    required_proof = {
+        "draft_retrieval_executed": _evidence_bool(proof, "draft_retrieval_executed"),
+        "draft_envelope_valid": _evidence_bool(proof, "draft_envelope_valid"),
+        "owned_recipient_delivery_executed": _evidence_bool(proof, "owned_recipient_delivery_executed"),
+    }
     evidence = {
         "imap_configuration_present": imap_configured,
         "smtp_configuration_present": smtp_configured,
-        "draft_retrieval_executed": False,
-        "owned_recipient_delivery_executed": False,
-        "smtp_activity_from_denial": False,
+        "evidence_file_present": bool(proof),
+        **required_proof,
     }
+    passed = (
+        imap_configured
+        and smtp_configured
+        and required_proof["draft_retrieval_executed"]
+        and required_proof["draft_envelope_valid"]
+        and required_proof["owned_recipient_delivery_executed"]
+    )
     return _gate(
         "owned_mail",
         True,
-        "fail",
-        "Owned Gmail draft retrieval and SMTP delivery were not proved in this environment.",
+        "pass" if passed else "fail",
+        "Owned Gmail draft retrieval and owned-recipient SMTP delivery were verified."
+        if passed
+        else "Owned Gmail draft retrieval and SMTP delivery were not proved in this environment.",
         evidence,
     )
 
@@ -352,7 +482,7 @@ def _probe_pivot_fixture(root: Path) -> dict[str, Any]:
 
 def _probe_host() -> dict[str, Any]:
     modules = {
-        name: importlib.util.find_spec(name) is not None
+        name: _module_present(name)
         for name in ("pytest", "openpyxl", "xlsxwriter", "uno", "cerebras.cloud.sdk")
     }
     commands = {name: _command_path(name) is not None for name in ("node", "npm", "bun", "daytona", "libreoffice")}
@@ -435,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    _load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     report = build_report(Path(__file__).resolve().parents[1], args.repo, args.offline)
     output = json.dumps(report, indent=2, sort_keys=True) if args.format == "json" else _markdown(report)
     print(output)
