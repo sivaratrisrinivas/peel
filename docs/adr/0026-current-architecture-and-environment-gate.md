@@ -26,10 +26,10 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| GitHub and Qodo | Public repository access and a Qodo review on the repository | Fail — GitHub authentication/API access and Qodo review were not proved |
+| GitHub and Qodo | Public repository access and a Qodo review on the repository | Fail — the connector proved public access, but no Qodo-reviewed pull request exists; local `gh` authentication is unavailable |
 | TrueForge and Cerebras | Serial tool loop with `gpt-oss-120b`, native approval denial, and zero side effects | Fail — no runtime proof |
 | Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Fail — no runtime proof |
-| Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Fail — no runtime proof |
+| Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Fail — the Gmail connector returned owned-account draft metadata, but provider-neutral IMAP retrieval and SMTP delivery were not proved |
 | Sensitive Reveal | Private transcript/retention path | Cut — metadata-only policy applies until proven |
 | LibreOffice | Availability for supported-profile reopen checks | Pass — temporary user-local bundle; system package remains unavailable |
 | Pivot fixture | Inspected trusted package with the required pivot-cache structures | Cut — no trusted fixture is present |

@@ -9,6 +9,7 @@
 - `openpyxl 3.1.5`, `xlsxwriter 3.2.9`, and Cerebras SDK `1.91.0` import successfully under Python `3.10.12`.
 - The official Daytona Linux amd64 binary is installed at `/home/srinivas/.local/bin/daytona` and reports `v0.190.0`.
 - The official LibreOffice `26.8.0` Linux x86-64 bundle was downloaded, matched its published SHA-256 `d0a6031a3837e48f9854e6d2da6489b9fadbd814afa4741fa32a197741663a22`, extracted to a temporary user-local directory, and passed a headless `soffice --version` probe as `26.8.0.3`.
+- The authenticated GitHub connector confirmed that `sivaratrisrinivas/peel` is public; the authenticated Gmail connector returned the owned account profile and draft metadata.
 
 The reproducible Python package set is recorded in `requirements-gate.txt`. The temporary LibreOffice bundle is intentionally not committed to the repository.
 
@@ -16,10 +17,10 @@ The reproducible Python package set is recorded in `requirements-gate.txt`. The 
 
 | Gate | Result | Current evidence |
 | --- | --- | --- |
-| `github_qodo` | `fail` | GitHub API/authentication is unavailable in the probe and no Qodo review exists on a pull request. |
+| `github_qodo` | `fail` | The connector proved that the repository is public, but no pull request/Qodo review exists; the local `gh` authentication probe is also unavailable. |
 | `trueforge_cerebras` | `fail` | The Cerebras SDK is importable, but no TrueForge runtime, credentials, serial tool loop, or denied native approval is available. |
 | `daytona` | `fail` | CLI version works, but `daytona list --format json` with an isolated config reports no authenticated profile; no sandbox lifecycle or artifact transfer was executed. |
-| `owned_mail` | `fail` | IMAP/SMTP configuration is absent; no owned draft retrieval or SMTP delivery was executed. |
+| `owned_mail` | `fail` | Gmail draft metadata retrieval was observed through the connector, but IMAP/SMTP configuration is absent and no owned-recipient SMTP delivery was executed. |
 
 ## Optional gates
 
