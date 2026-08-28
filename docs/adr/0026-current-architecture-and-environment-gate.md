@@ -20,6 +20,8 @@ Cerebras Scope Assessment is a one-way advisory veto. `mismatch`, `insufficient_
 
 The TrueForge/Cerebras gate uses an explicitly configured Cerebras custom model and records the model resolved by the returned TrueForge session and live model/provider catalogs. `gpt-oss-120b` remains the preferred model; the current TrueForge 0.1.4 runtime probe also supports the configured `gemma-4-31b` fallback because the preferred model's deferred-tool continuation returned HTTP 400. Selecting the fallback is valid only after the same serial-tool, native-denial, runtime-identity, and zero-side-effect proof passes; it is not a silent provider substitution.
 
+Google Drive is an optional fixture-intake and review path for the hackathon. It may provide a sanitized raw `.xlsx` fixture or a metadata-only report, but it does not own Run state, approvals, artifact identity, formula evaluation, or fidelity decisions. Peel must fetch the original Office file, verify its hash locally, and avoid converting the authoritative fixture into native Google Sheets. A connected Drive search on 2026-08-29 found no suitable raw `.xlsx` pivot fixture, so pivot-fixture coverage remains an explicit cut.
+
 The supported claim is limited to mechanisms that Peel supports and successfully executes. Unknown or unsupported content-bearing workbook features, unproven fidelity, or failed Verification produce Refusal rather than a globally “clean” result. Untouched OOXML ZIP members remain byte-identical; changed members receive targeted semantic checks.
 
 ## Environment gate
