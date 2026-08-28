@@ -113,7 +113,7 @@ def test_dotenv_loader_accepts_values_without_executing_shell(monkeypatch, tmp_p
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "export IMAP_HOST=imap.gmail.com\n"
-        "SMTP_HOST=\"smtp.gmail.com\"\n"
+        "SMTP_HOST=\"smtp.gmail.com\\r\"\n"
         "INVALID-NAME=ignored\n",
         encoding="utf-8",
     )

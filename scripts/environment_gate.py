@@ -92,6 +92,10 @@ def _load_dotenv(path: Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
+        value = value.strip()
+        for escaped_line_end in (r"\r", r"\n"):
+            if value.endswith(escaped_line_end):
+                value = value[: -len(escaped_line_end)].rstrip()
         os.environ.setdefault(name, value)
 
 
