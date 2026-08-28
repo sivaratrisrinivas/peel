@@ -28,19 +28,19 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| GitHub and Qodo | Public repository access and a Qodo review on the repository | Fail — the current host's `gh` token is invalid; re-authentication is required for the final live gate |
-| TrueForge and Cerebras | Serial tool loop with a configured Cerebras model, native approval denial, and zero side effects | Pass — `gemma-4-31b` completed the live TrueForge probe; `gpt-oss-120b` remains the preferred recheck target after the TrueForge runtime compatibility issue is resolved |
+| GitHub and Qodo | Public repository access and a Qodo review on the repository | Pass — public access and the final Qodo review for PR #11 commit `29c1046` were verified; all findings are resolved |
+| TrueForge and Cerebras | Serial tool loop with a configured Cerebras model, native approval denial, and zero side effects | Pass — the returned runtime identity and `gemma-4-31b` live TrueForge probe passed; `gpt-oss-120b` remains the preferred recheck target after the TrueForge runtime compatibility issue is resolved |
 | Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Pass — the live Python SDK probe completed the full lifecycle and hash check |
 | Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Pass — the live IMAP/SMTP probe validated the strict draft envelope and completed one owned-recipient delivery |
 | Sensitive Reveal | Private transcript/retention path | Cut — metadata-only policy applies until proven |
 | LibreOffice | Availability for supported-profile reopen checks | Cut — the current host has no available LibreOffice binary; the dependent route remains out of scope |
 | Pivot fixture | Inspected trusted package with the required pivot-cache structures | Cut — no trusted fixture is present |
 
-The current consolidated decision is `NO-GO` solely because GitHub authentication prevented the public-repository/Qodo probe from completing on this host. Any mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.
+The final consolidated decision is `GO`: every mandatory gate passed in the live environment record dated 2026-08-28. Any future mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.
 
 ## Consequences
 
 - The repository can begin implementation only after the mandatory external probes pass in the documented WSL2/Ubuntu environment.
 - The gate is reproducible through `scripts/environment_gate.py`; it emits only bounded metadata and never emits credential values or workbook contents.
-- The current host's missing integrations are recorded as a no-go, not papered over with local substitutes.
+- The currently unavailable optional integrations are recorded as explicit cuts, not papered over with local substitutes.
 - The draft ADRs remain useful historical context without competing with this decision record.
