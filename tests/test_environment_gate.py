@@ -216,6 +216,7 @@ def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: P
         lambda name: None if name == "daytona" else f"/bin/{name}",
     )
     monkeypatch.setattr(environment_gate, "_module_present", lambda name: True)
+    monkeypatch.setattr(environment_gate, "_daytona_sdk_usable", lambda: True)
     monkeypatch.setattr(environment_gate, "_run", lambda command, timeout=8.0: True)
 
     assert environment_gate._probe_trueforge_cerebras()["status"] == "pass"
@@ -248,7 +249,7 @@ def test_mail_probe_accepts_only_the_required_draft_envelope(monkeypatch) -> Non
 
     assert mail_gate_probe._draft_envelope_valid(message) is True
 
-    message.add_attachment(b"second", maintype="application", subtype="octet-stream", filename="other.xlsx")
+    message.add_attachment(b"second", maintype="application", subtype="pdf", filename="other.pdf")
     assert mail_gate_probe._draft_envelope_valid(message) is False
 
     message = mail_gate_probe.EmailMessage()

@@ -133,6 +133,16 @@ def _evidence_string(evidence: dict[str, Any], name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _daytona_sdk_usable() -> bool:
+    """Check the exact Daytona SDK symbols imported by the live probe."""
+
+    try:
+        from daytona import CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig
+    except Exception:
+        return False
+    return all(callable(symbol) for symbol in (CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig))
+
+
 def _gate(
     name: str,
     mandatory: bool,
@@ -336,7 +346,7 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
 
 def _probe_daytona() -> dict[str, Any]:
     credentials = _env_present(("DAYTONA_API_KEY",))
-    sdk_present = _module_present("daytona")
+    sdk_present = _daytona_sdk_usable()
     proof = _read_probe_evidence("PEEL_DAYTONA_EVIDENCE_FILE", "daytona")
     required_proof = {
         "sandbox_created": _evidence_bool(proof, "sandbox_created"),

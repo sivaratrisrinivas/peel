@@ -75,12 +75,14 @@ def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None =
         [str(value) for header in ("To", "Cc", "Bcc") for value in message.get_all(header, [])]
     )
     recipient_valid = bool(allowed) and len(recipients) == 1 and recipients[0][1].strip().casefold() == allowed
-    xlsx_parts = []
+    attachment_parts = []
     body_parts = []
     for part in message.walk():
         filename = part.get_filename() or ""
-        if filename.lower().endswith(".xlsx"):
-            xlsx_parts.append(filename)
+        if part.get_content_maintype() != "multipart" and (
+            part.get_content_disposition() == "attachment" or filename
+        ):
+            attachment_parts.append(filename)
         if part.get_content_type() == "text/plain" and part.get_content_disposition() != "attachment":
             try:
                 body_parts.append(part.get_content())
@@ -89,7 +91,11 @@ def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None =
     body = "\n".join(str(part) for part in body_parts)
     disclosure_fields = re.findall(r"(?im)^\s*intended disclosure\s*:\s*(.*?)\s*$", body)
     disclosure_valid = len(disclosure_fields) == 1 and bool(disclosure_fields[0].strip())
-    return len(xlsx_parts) == 1 and bool(subject) and recipient_valid and disclosure_valid
+    attachment_valid = (
+        len(attachment_parts) == 1
+        and attachment_parts[0].lower().endswith(".xlsx")
+    )
+    return attachment_valid and bool(subject) and recipient_valid and disclosure_valid
 
 
 def _retrieve_draft() -> tuple[bool, bool]:
