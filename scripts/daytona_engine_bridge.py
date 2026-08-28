@@ -100,7 +100,7 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(engine_result, dict):
             raise RuntimeError("Daytona production engine returned invalid JSON")
         if request["operation"] == "verify" and engine_result.get("status") == "verified":
-            downloaded = sandbox.fs.download_file(OUTPUT_PATH, timeout=120)
+            downloaded = sandbox.fs.download_file(OUTPUT_PATH)
             if not isinstance(downloaded, bytes):
                 raise RuntimeError("Daytona returned an invalid declared artifact")
             expected_hash = request["artifact"]["sha256"]

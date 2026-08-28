@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.client import HTTPResponse
 from pathlib import Path
 from typing import Any
@@ -63,12 +64,46 @@ class _API:
             headers=headers,
             method="POST",
         )
-        try:
-            with request.urlopen(req, timeout=180) as response:
-                return _read_sse(response)
-        except error.HTTPError as exc:
-            detail = exc.read(500).decode("utf-8", errors="replace")
-            raise RuntimeError(f"TrueForge turn failed with HTTP {exc.code}: {detail}") from exc
+        for attempt in range(4):
+            try:
+                with request.urlopen(req, timeout=180) as response:
+                    events = _read_sse(response)
+                if _rate_limited_without_tool_activity(events) and attempt < 3:
+                    time.sleep(min(60, 15 * (2**attempt)))
+                    continue
+                return events
+            except error.HTTPError as exc:
+                detail = exc.read(500).decode("utf-8", errors="replace")
+                if exc.code != 429 or attempt == 3:
+                    raise RuntimeError(f"TrueForge turn failed with HTTP {exc.code}: {detail}") from exc
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    delay = max(1, min(int(retry_after), 60)) if retry_after else min(60, 15 * (2**attempt))
+                except ValueError:
+                    delay = min(60, 15 * (2**attempt))
+                time.sleep(delay)
+
+
+def _rate_limited_without_tool_activity(events: list[dict[str, Any]]) -> bool:
+    """Retry a provider rate limit only when no tool action has started."""
+
+    has_tool_activity = any(
+        event.get("type") in {"tool.response", "tool.approval_required"}
+        or (event.get("type") in {"model.message", "model.message.delta"} and event.get("tool_calls"))
+        for event in events
+    )
+    if has_tool_activity:
+        return False
+    for event in reversed(events):
+        if event.get("type") != "turn.done":
+            continue
+        state = event.get("state")
+        return (
+            isinstance(state, dict)
+            and state.get("status") == "error"
+            and state.get("message") == "Request failed (429): Too Many Requests"
+        )
+    return False
 
 
 def _read_sse(response: HTTPResponse) -> list[dict[str, Any]]:

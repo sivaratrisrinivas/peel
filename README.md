@@ -44,7 +44,9 @@ to the absolute WSL Node path. Required local configuration is listed in
 recipient uses a separate mailbox. The run exits `0` only after the recipient
 confirms exactly one message with the expected SHA-256, and exits `2` with
 bounded failed-state evidence otherwise. It never falls back to the local
-Python engine in live mode.
+Python engine in live mode. The runner supplies valid command identities and
+uses bounded Cerebras rate-limit backoff only before a tool action starts; a
+completed tool response is never replayed.
 
 Issue #5 adds the first read-only concealed-data journey. The deterministic
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
@@ -68,6 +70,10 @@ Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
 suspicious hidden worksheets, missing context, scope mismatch, model failure,
 private Reveal expiry, and visible refusal. The default path keeps Reveal off,
 and a refused Run has no Repair or Disclosure path.
+
+Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
+TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with
+zero SMTP activity, fresh approval, and one matching owned-recipient message.
 
 Issue #2 is complete. The final live gate passed on 2026-08-28 at commit
 `d4a9342187a74d6f686442bccc2a665e110ce4e`.

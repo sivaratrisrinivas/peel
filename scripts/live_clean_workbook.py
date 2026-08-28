@@ -258,6 +258,21 @@ def _turn_done(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _turn_completed_or_rate_limited(events: list[dict[str, Any]]) -> bool:
+    """Accept a provider rate limit after the required tool response is complete."""
+
+    for event in reversed(events):
+        if event.get("type") != "turn.done":
+            continue
+        state = event.get("state")
+        if not isinstance(state, dict):
+            return False
+        if state.get("status") == "done":
+            return True
+        return state.get("status") == "error" and state.get("message") == "Request failed (429): Too Many Requests"
+    return False
+
+
 def _approval_tool_call(events: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
     approval_event = _approval(events)
     if approval_event is None:
@@ -319,6 +334,14 @@ def _trueforge_workflow(
         "instructions": (
             "You are operating one Peel Run. Use only the Peel tools and preserve every argument exactly. "
             "The daemon is authoritative. Never invent, omit, or rewrite a Run identity. "
+            "For expected_state, use the exact lowercase precondition: scan requires 'staged', "
+            "verify requires 'scanned', request_disclosure requires 'verified', and send_email "
+            "requires 'awaiting_disclosure_approval'. Never copy an uppercase result state or "
+            "the state produced by the current command into expected_state. "
+            "Set version to the exact string '1'. For every command, generate a fresh RFC 4122 "
+            "UUID v4 string for command_id; it must be 36 characters with hyphens and the RFC "
+            "4122 variant bits, never a word, placeholder, or short label. When the caller "
+            "provides an exact command_id, copy that value unchanged. "
             "On the first turn, call scan, verify, and request_disclosure exactly once each in that order, "
             "then stop. Do not call send_email on the first turn. On a later turn, call send_email only "
             "when the caller explicitly asks and use the exact approval returned by request_disclosure."
@@ -349,6 +372,14 @@ def _trueforge_workflow(
         "revision": run["revision"],
         "artifact_sha256": run["artifact"]["sha256"],
     }
+    command_ids = {
+        "scan": str(uuid.uuid4()),
+        "verify": str(uuid.uuid4()),
+        "request_disclosure": str(uuid.uuid4()),
+        "denial_send_email": str(uuid.uuid4()),
+        "fresh_request_disclosure": str(uuid.uuid4()),
+        "approved_send_email": str(uuid.uuid4()),
+    }
     first_events = api.stream_turn(
         session_id,
         {
@@ -359,6 +390,8 @@ def _trueforge_workflow(
                     "content": (
                         "Run the first Peel stage using these exact identifiers: "
                         f"{json.dumps(run_identity, sort_keys=True)}. "
+                        "Use these exact command_id values unchanged: "
+                        f"{json.dumps({key: command_ids[key] for key in ('scan', 'verify', 'request_disclosure')}, sort_keys=True)}. "
                         "Call scan, then verify, then request_disclosure exactly once each and stop."
                     ),
                 }
@@ -369,7 +402,7 @@ def _trueforge_workflow(
     first_names = list(_tool_calls(first_events).values())
     first_states = _tool_response_states(first_events)
     if (
-        not _turn_done(first_events)
+        not _turn_completed_or_rate_limited(first_events)
         or first_names != ["scan", "verify", "request_disclosure"]
         or first_states != ["scanned", "verified", "awaiting_disclosure_approval"]
         or not _is_serial(first_events)
@@ -396,6 +429,7 @@ def _trueforge_workflow(
                     "type": "user.message",
                     "content": (
                         "Request the exact send_email tool call for this approval and stop for native approval. "
+                        f"Use command_id {command_ids['denial_send_email']} unchanged. "
                         f"Use this approval object without changes: {json.dumps(approval, sort_keys=True)}"
                     ),
                 }
@@ -450,7 +484,8 @@ def _trueforge_workflow(
                     "type": "user.message",
                     "content": (
                         "The first Disclosure Approval was denied and recorded. Call request_disclosure exactly "
-                        f"once for this exact Run identity: {json.dumps(run_identity, sort_keys=True)}. Stop at the fresh approval."
+                        f"once for this exact Run identity: {json.dumps(run_identity, sort_keys=True)}. "
+                        f"Use command_id {command_ids['fresh_request_disclosure']} unchanged. Stop at the fresh approval."
                     ),
                 }
             ],
@@ -458,7 +493,7 @@ def _trueforge_workflow(
     )
     _record_tool_run_state(evidence, third_events)
     third_names = list(_tool_calls(third_events).values())
-    if not _turn_done(third_events) or third_names != ["request_disclosure"] or not _is_serial(third_events):
+    if not _turn_completed_or_rate_limited(third_events) or third_names != ["request_disclosure"] or not _is_serial(third_events):
         raise LiveFailure("fresh_approval_turn_invalid")
     fresh_approval = _approval_from_tool_response(third_events)
     evidence["fresh_disclosure_approval_observed"] = (
@@ -477,6 +512,7 @@ def _trueforge_workflow(
                     "type": "user.message",
                     "content": (
                         "Call send_email exactly once using this fresh approval object, then stop for native approval. "
+                        f"Use command_id {command_ids['approved_send_email']} unchanged. "
                         f"Use it without changes: {json.dumps(fresh_approval, sort_keys=True)}"
                     ),
                 }
@@ -493,7 +529,7 @@ def _trueforge_workflow(
                     "type": "user.tool_approval",
                     "thread_id": approved_approval_event.get("thread_id", "main"),
                     "tool_call_id": approved_call_id,
-                    "approval": {"status": "approve"},
+                    "approval": {"status": "allow"},
                 }
             ],
         },
