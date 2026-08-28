@@ -40,6 +40,6 @@ Run `scripts/daytona_gate_probe.py` with a real API key. It creates a uniquely n
 
 ## Owned mail
 
-Run `scripts/mail_gate_probe.py` after placing a draft with exactly one `.xlsx` attachment, a non-empty subject, and an `Intended disclosure:` body field in the owned sender mailbox. The probe retrieves the draft over IMAP. Pass `--send` only when `PEEL_OWNED_RECIPIENT` is an address you own; it submits one uniquely identified SMTP test message to that recipient.
+Run `scripts/mail_gate_probe.py` after placing a draft with exactly one `.xlsx` attachment, a non-empty subject, exactly one non-empty `Intended disclosure:` body field, and exactly one recipient equal to `PEEL_OWNED_RECIPIENT` in the owned sender mailbox. The probe retrieves the draft over IMAP. Pass `--send` only when `PEEL_OWNED_RECIPIENT` is an address you own; it submits one uniquely identified SMTP test message to that recipient.
 
 The gate records only booleans from these probes and never records the mailbox address, draft body, attachment bytes, recipient, or credentials.

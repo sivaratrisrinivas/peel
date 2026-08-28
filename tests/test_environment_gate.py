@@ -210,7 +210,11 @@ def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: P
     monkeypatch.setenv("PEEL_DAYTONA_EVIDENCE_FILE", str(daytona_file))
     monkeypatch.setenv("PEEL_MAIL_EVIDENCE_FILE", str(mail_file))
     monkeypatch.setattr(environment_gate, "_env_present", lambda names: True)
-    monkeypatch.setattr(environment_gate, "_command_path", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        environment_gate,
+        "_command_path",
+        lambda name: None if name == "daytona" else f"/bin/{name}",
+    )
     monkeypatch.setattr(environment_gate, "_module_present", lambda name: True)
     monkeypatch.setattr(environment_gate, "_run", lambda command, timeout=8.0: True)
 
@@ -229,9 +233,11 @@ def test_probe_evidence_requires_matching_probe_name(tmp_path: Path, monkeypatch
     ) == {}
 
 
-def test_mail_probe_accepts_only_the_required_draft_envelope() -> None:
+def test_mail_probe_accepts_only_the_required_draft_envelope(monkeypatch) -> None:
+    monkeypatch.setenv("PEEL_OWNED_RECIPIENT", "owned@example.com")
     message = mail_gate_probe.EmailMessage()
     message["Subject"] = "Disclosure draft"
+    message["To"] = "owned@example.com"
     message.set_content("Intended disclosure: the recipient may receive this workbook.")
     message.add_attachment(
         b"xlsx bytes",
@@ -244,6 +250,30 @@ def test_mail_probe_accepts_only_the_required_draft_envelope() -> None:
 
     message.add_attachment(b"second", maintype="application", subtype="octet-stream", filename="other.xlsx")
     assert mail_gate_probe._draft_envelope_valid(message) is False
+
+    message = mail_gate_probe.EmailMessage()
+    message["Subject"] = "Disclosure draft"
+    message["To"] = "owned@example.com"
+    message.set_content("Intended disclosure: first\nIntended disclosure: second")
+    message.add_attachment(
+        b"xlsx bytes",
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="disclosure.xlsx",
+    )
+    assert mail_gate_probe._draft_envelope_valid(message) is False
+
+    other_recipient = mail_gate_probe.EmailMessage()
+    other_recipient["Subject"] = "Disclosure draft"
+    other_recipient["To"] = "other@example.com"
+    other_recipient.set_content("Intended disclosure: the recipient may receive this workbook.")
+    other_recipient.add_attachment(
+        b"xlsx bytes",
+        maintype="application",
+        subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="disclosure.xlsx",
+    )
+    assert mail_gate_probe._draft_envelope_valid(other_recipient) is False
 
 
 def test_mail_probe_normalizes_gmail_app_password_grouping(monkeypatch) -> None:

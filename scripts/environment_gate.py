@@ -335,9 +335,8 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
 
 
 def _probe_daytona() -> dict[str, Any]:
-    cli_path = _command_path("daytona")
     credentials = _env_present(("DAYTONA_API_KEY",))
-    version_probe_succeeded = _run([cli_path, "version"]) if cli_path else False
+    sdk_present = _module_present("daytona")
     proof = _read_probe_evidence("PEEL_DAYTONA_EVIDENCE_FILE", "daytona")
     required_proof = {
         "sandbox_created": _evidence_bool(proof, "sandbox_created"),
@@ -347,13 +346,12 @@ def _probe_daytona() -> dict[str, Any]:
         "sandbox_destroyed": _evidence_bool(proof, "sandbox_destroyed"),
     }
     evidence = {
-        "cli_present": cli_path is not None,
-        "version_probe_succeeded": version_probe_succeeded,
+        "daytona_sdk_present": sdk_present,
         "credentials_present": credentials,
         "evidence_file_present": bool(proof),
         **required_proof,
     }
-    passed = credentials and version_probe_succeeded and all(required_proof.values())
+    passed = credentials and sdk_present and all(required_proof.values())
     return _gate(
         "daytona",
         True,

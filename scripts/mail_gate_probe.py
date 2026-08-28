@@ -15,6 +15,7 @@ import uuid
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any, cast
 
@@ -66,8 +67,14 @@ def _write_evidence(path: Path, evidence: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _draft_envelope_valid(message: EmailMessage) -> bool:
+def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None = None) -> bool:
     subject = str(message.get("Subject", "")).strip()
+    configured_recipient = os.environ.get("PEEL_OWNED_RECIPIENT") or ""
+    allowed = (allowed_recipient or configured_recipient).strip().casefold()
+    recipients = getaddresses(
+        [str(value) for header in ("To", "Cc", "Bcc") for value in message.get_all(header, [])]
+    )
+    recipient_valid = bool(allowed) and len(recipients) == 1 and recipients[0][1].strip().casefold() == allowed
     xlsx_parts = []
     body_parts = []
     for part in message.walk():
@@ -80,7 +87,9 @@ def _draft_envelope_valid(message: EmailMessage) -> bool:
             except (LookupError, UnicodeError):
                 continue
     body = "\n".join(str(part) for part in body_parts)
-    return len(xlsx_parts) == 1 and bool(subject) and "intended disclosure:" in body.lower()
+    disclosure_fields = re.findall(r"(?im)^\s*intended disclosure\s*:\s*(.*?)\s*$", body)
+    disclosure_valid = len(disclosure_fields) == 1 and bool(disclosure_fields[0].strip())
+    return len(xlsx_parts) == 1 and bool(subject) and recipient_valid and disclosure_valid
 
 
 def _retrieve_draft() -> tuple[bool, bool]:
