@@ -145,8 +145,8 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
 
     def capture(command, timeout=8.0):
         calls.append(list(command))
-        if command[1:3] == ["auth", "status"]:
-            return True, "Logged in to github.com", ""
+        if command[1:3] == ["api", "user"]:
+            return True, "", ""
         if command[1:3] == ["api", "repos/sivaratrisrinivas/peel"]:
             return True, "false\n", ""
         if any("pulls/1/reviews" in item for item in command):

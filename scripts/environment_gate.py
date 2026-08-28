@@ -207,12 +207,10 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
             evidence,
         )
 
-    authenticated, auth_stdout, auth_stderr = _capture([gh_path, "auth", "status"])
-    auth_output = f"{auth_stdout}\n{auth_stderr}".lower()
-    authenticated = authenticated and not any(
-        marker in auth_output
-        for marker in ("failed to log in", "invalid", "not logged in", "authentication failed")
-    )
+    # `gh auth status` exits nonzero when any unrelated inactive account is
+    # configured on the host. The authenticated API identity is the probe we
+    # actually need, and `--silent` prevents account metadata from leaking.
+    authenticated, _, _ = _capture([gh_path, "api", "user", "--silent"])
     evidence["authenticated"] = authenticated
     if not authenticated:
         return _gate(
