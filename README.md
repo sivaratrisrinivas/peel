@@ -11,6 +11,12 @@ SQLite authority and deterministic fake Artifact, workbook-engine, and mail
 adapters. Live Daytona, mailbox, TrueForge, and SMTP adapters remain later
 integration work; the fake mail adapter never sends external mail.
 
+Issue #3 is complete. The public daemon covers the clean workbook workflow,
+strict command and engine contracts, artifact integrity, revision invalidation,
+approval expiry, denial, duplicate delivery, and ambiguous delivery. HTTP and
+MCP expose the same command contract. The fake mail adapter records accepted
+messages but never sends mail outside the process.
+
 ## Current status
 
 Issue #2 is complete. The final live gate passed on 2026-08-28 at commit
@@ -161,8 +167,14 @@ built-in `node:sqlite` API:
 ```bash
 npm install
 npm run typecheck
+npm run build
 npm test
+npm audit
 ```
+
+Run these commands in the supported WSL2/Ubuntu environment. Vitest reads only
+`tests/**/*.test.ts`, so a build in `dist/` cannot be collected as a second
+copy of the test suite.
 
 Run the deterministic checks without loading unrelated host pytest plugins:
 
