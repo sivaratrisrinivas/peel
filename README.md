@@ -8,14 +8,43 @@ the result only after the required human decisions.
 The environment gate had to pass before dependent product work could begin.
 The issue #3 safety kernel is now implemented as a TypeScript daemon with a
 SQLite authority and deterministic fake Artifact, workbook-engine, and mail
-adapters. Live Daytona, mailbox, TrueForge, and SMTP adapters remain later
-integration work; the fake mail adapter never sends external mail.
+adapters. Issue #4 adds the live Daytona, mailbox, TrueForge, and SMTP journey;
+the fake adapters remain deterministic test doubles and never send external
+mail.
 
 Issue #3 is complete. The public daemon covers the clean workbook workflow,
 strict command and engine contracts, artifact integrity, revision invalidation,
 approval expiry, denial, duplicate delivery, and ambiguous delivery. HTTP and
 MCP expose the same command contract. The fake mail adapter records accepted
 messages but never sends mail outside the process.
+
+## Live clean-workbook journey
+
+Issue #4 is exercised by `scripts/live_clean_workbook.py`. It retrieves the
+newest eligible Gmail draft over IMAP, stages its attachment through the daemon,
+and asks a real TrueForge/Cerebras session to run `scan`, `verify`, and
+`request_disclosure` through the daemon MCP endpoint. The direct `send_email`
+tool is configured as a native TrueForge approval boundary: the first approval
+is denied and recorded safely, then a fresh approval is required before SMTP
+delivery. The daemon's live engine adapter uses a fresh Daytona sandbox for
+each engine command and downloads only the declared verified artifact. The
+runner confirms exactly one matching attachment in the recipient mailbox and
+writes only bounded evidence to `/tmp/peel-live-clean-evidence.json`.
+
+Run it from the supported WSL2/Ubuntu environment after building the daemon,
+with the existing TrueForge server running and an eligible draft already saved:
+
+```bash
+bash -ic 'TMPDIR=/tmp TMP=/tmp TEMP=/tmp npm run build && python3 scripts/live_clean_workbook.py'
+```
+
+If the WSL shell does not expose Node to child processes, set `PEEL_NODE_BIN`
+to the absolute WSL Node path. Required local configuration is listed in
+`.env.example`; the recipient IMAP variables are required when the owned
+recipient uses a separate mailbox. The run exits `0` only after the recipient
+confirms exactly one message with the expected SHA-256, and exits `2` with
+bounded failed-state evidence otherwise. It never falls back to the local
+Python engine in live mode.
 
 Issue #5 adds the first read-only concealed-data journey. The deterministic
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
@@ -80,7 +109,8 @@ The kernel exposes the same versioned command boundary to both HTTP and MCP:
   `request_disclosure`, and `respond_disclosure` commands.
 - `GET /v1/runs/<run-id>` returns bounded Run metadata and evidence.
 - `POST /mcp` exposes the same commands through `initialize`, `tools/list`,
-  and `tools/call`.
+  and `tools/call`; live TrueForge sessions also receive the direct native
+  approval-gated `send_email` tool.
 
 Every command is versioned, strict, bound to an expected Run state and
 identity, and consumed once by SQLite. The clean path preserves the original

@@ -155,6 +155,20 @@ function toolSchema(name: string): JsonRecord {
       },
     };
   }
+  if (name === "send_email") {
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["version", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "binding"],
+      properties: {
+        ...commonProperties,
+        expected_state: { const: "awaiting_disclosure_approval" },
+        approval_id: uuidSchema,
+        idempotency_key: uuidSchema,
+        binding: bindingSchema,
+      },
+    };
+  }
   const expectedState = name === "scan" ? "staged" : name === "verify" ? "scanned" : "verified";
   return {
     type: "object",
@@ -165,11 +179,17 @@ function toolSchema(name: string): JsonRecord {
 }
 
 function toolDefinitions(): JsonRecord[] {
-  const names = ["stage", "scan", "verify", "request_disclosure", "respond_disclosure"];
+  const names = ["stage", "scan", "verify", "request_disclosure", "respond_disclosure", "send_email"];
   return names.map((name) => ({
     name,
-    description: `Execute the governed ${name} command.`,
+    description:
+      name === "send_email"
+        ? "Release the exact verified artifact after native Disclosure Approval."
+        : `Execute the governed ${name} command.`,
     inputSchema: toolSchema(name),
+    ...(name === "send_email"
+      ? { annotations: { readOnlyHint: false, destructiveHint: true } }
+      : {}),
   }));
 }
 
@@ -197,10 +217,16 @@ async function handleMcp(daemon: PeelDaemon, payload: unknown): Promise<JsonReco
   }
   const name = payload.params.name;
   const args = payload.params.arguments;
-  if (typeof name !== "string" || !isRecord(args) || !["stage", "scan", "verify", "request_disclosure", "respond_disclosure"].includes(name)) {
+  if (
+    typeof name !== "string" ||
+    !isRecord(args) ||
+    !["stage", "scan", "verify", "request_disclosure", "respond_disclosure", "send_email"].includes(name)
+  ) {
     return jsonRpcError(id, -32602, "Invalid tool call");
   }
-  const result = await daemon.execute({ ...args, command: name });
+  const command = name === "send_email" ? "respond_disclosure" : name;
+  const commandArgs = name === "send_email" ? { ...args, decision: "approve" } : args;
+  const result = await daemon.execute({ ...commandArgs, command });
   return {
     jsonrpc: "2.0",
     id,

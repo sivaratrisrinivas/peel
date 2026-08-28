@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { PeelDaemon } from "./daemon.js";
+import { DaytonaWorkbookEngine, InMemoryArtifactStore, SmtpDisclosureMailer } from "./adapters.js";
 import { createPeelHttpServer } from "./http.js";
 
 const recipient = process.env.PEEL_OWNED_RECIPIENT;
@@ -9,9 +10,20 @@ if (!recipient) throw new Error("PEEL_OWNED_RECIPIENT is required");
 
 const databasePath = process.env.PEEL_DATABASE_PATH ?? ".peel/peel.sqlite";
 if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true });
+const liveMode = process.env.PEEL_LIVE_MODE === "1";
+const artifacts = new InMemoryArtifactStore();
+
+if (liveMode) {
+  for (const name of ["DAYTONA_API_KEY", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"]) {
+    if (!process.env[name]) throw new Error(`${name} is required in live mode`);
+  }
+}
 
 const daemon = new PeelDaemon({
   allowedRecipients: [recipient],
+  artifactStore: artifacts,
+  engine: liveMode ? new DaytonaWorkbookEngine(artifacts) : undefined,
+  disclosureMailer: liveMode ? new SmtpDisclosureMailer() : undefined,
   databasePath,
 });
 const server = createPeelHttpServer(daemon);

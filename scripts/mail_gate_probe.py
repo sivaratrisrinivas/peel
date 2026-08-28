@@ -12,6 +12,7 @@ import re
 import smtplib
 import ssl
 import uuid
+from dataclasses import dataclass
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -22,6 +23,7 @@ from typing import Any, cast
 
 SCHEMA_VERSION = "1"
 DEFAULT_EVIDENCE_FILE = "/tmp/peel-mail-evidence.json"
+MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
 REQUIRED_KEYS = (
     "IMAP_HOST",
     "IMAP_USERNAME",
@@ -71,7 +73,42 @@ def _write_evidence(path: Path, evidence: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None = None) -> bool:
+@dataclass(frozen=True)
+class RetrievedDraft:
+    """The bounded data needed to create one Peel Mailbox Trigger."""
+
+    mailbox_account: str
+    folder_uidvalidity: str
+    message_uid: str
+    sender: str
+    recipient: str
+    subject: str
+    body: str
+    attachment_filename: str
+    attachment_bytes: bytes
+
+
+def _body_text(message: EmailMessage) -> str:
+    body_parts: list[str] = []
+    for part in message.walk():
+        if part.get_content_type() != "text/plain" or part.get_content_disposition() == "attachment":
+            continue
+        try:
+            content = part.get_content()
+        except (LookupError, UnicodeError):
+            continue
+        body_parts.append(str(content))
+    return "\n".join(body_parts)
+
+
+def _parse_eligible_draft(
+    message: EmailMessage,
+    *,
+    allowed_recipient: str | None = None,
+    mailbox_account: str = "",
+    folder_uidvalidity: str = "",
+    message_uid: str = "",
+) -> RetrievedDraft | None:
     subject = str(message.get("Subject", "")).strip()
     configured_recipient = os.environ.get("PEEL_OWNED_RECIPIENT") or ""
     allowed = (allowed_recipient or configured_recipient).strip().casefold()
@@ -79,28 +116,60 @@ def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None =
         [str(value) for header in ("To", "Cc", "Bcc") for value in message.get_all(header, [])]
     )
     recipient_valid = bool(allowed) and len(recipients) == 1 and recipients[0][1].strip().casefold() == allowed
-    attachment_parts = []
-    body_parts = []
+    senders = getaddresses([str(value) for value in message.get_all("From", [])])
+    sender = senders[0][1].strip() if len(senders) == 1 else ""
+    attachment_parts: list[tuple[str, bytes]] = []
     for part in message.walk():
         filename = part.get_filename() or ""
         if part.get_content_disposition() == "attachment" or filename:
-            attachment_parts.append(filename)
-        if part.get_content_type() == "text/plain" and part.get_content_disposition() != "attachment":
-            try:
-                body_parts.append(part.get_content())
-            except (LookupError, UnicodeError):
-                continue
-    body = "\n".join(str(part) for part in body_parts)
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                attachment_parts.append((filename, payload))
+            else:
+                attachment_parts.append((filename, b""))
+    body = _body_text(message)
     disclosure_fields = re.findall(r"(?im)^\s*intended disclosure\s*:\s*(.*?)\s*$", body)
     disclosure_valid = len(disclosure_fields) == 1 and bool(disclosure_fields[0].strip())
-    attachment_valid = (
-        len(attachment_parts) == 1
-        and attachment_parts[0].lower().endswith(".xlsx")
+    attachment_valid = len(attachment_parts) == 1 and attachment_parts[0][0].lower().endswith(".xlsx")
+    if not (
+        attachment_valid
+        and bool(subject)
+        and bool(sender)
+        and recipient_valid
+        and disclosure_valid
+        and "/" not in attachment_parts[0][0]
+        and "\\" not in attachment_parts[0][0]
+        and 0 < len(attachment_parts[0][1]) <= MAX_ARTIFACT_BYTES
+    ):
+        return None
+    return RetrievedDraft(
+        mailbox_account=mailbox_account,
+        folder_uidvalidity=folder_uidvalidity,
+        message_uid=message_uid,
+        sender=sender,
+        recipient=recipients[0][1].strip(),
+        subject=subject,
+        body=body,
+        attachment_filename=attachment_parts[0][0],
+        attachment_bytes=attachment_parts[0][1],
     )
-    return attachment_valid and bool(subject) and recipient_valid and disclosure_valid
 
 
-def _retrieve_draft() -> tuple[bool, bool]:
+def _draft_envelope_valid(message: EmailMessage, allowed_recipient: str | None = None) -> bool:
+    return _parse_eligible_draft(message, allowed_recipient=allowed_recipient) is not None
+
+
+def _uidvalidity(client: imaplib.IMAP4_SSL) -> str:
+    response = client.response("UIDVALIDITY")
+    if response and len(response) == 2 and response[1]:
+        value = response[1][0]
+        if isinstance(value, bytes):
+            return value.decode("ascii", errors="replace")
+        return str(value)
+    raise RuntimeError("IMAP did not return UIDVALIDITY")
+
+
+def _retrieve_eligible_draft() -> RetrievedDraft | None:
     host = os.environ["IMAP_HOST"]
     username = os.environ["IMAP_USERNAME"]
     password = _secret("IMAP_PASSWORD")
@@ -108,26 +177,39 @@ def _retrieve_draft() -> tuple[bool, bool]:
     with imaplib.IMAP4_SSL(host, int(os.environ.get("IMAP_PORT", "993"))) as client:
         login_status, _ = client.login(username, password)
         if login_status != "OK":
-            return False, False
+            return None
         select_status, _ = client.select(mailbox, readonly=True)
         if select_status != "OK":
-            return False, False
-        search_status, data = client.search(None, "ALL")
+            return None
+        folder_uidvalidity = _uidvalidity(client)
+        search_status, data = client.uid("search", None, "ALL")
         if search_status != "OK" or not data or not data[0]:
-            return True, False
+            return None
         message_ids = data[0].split()
         for message_id in reversed(message_ids[-100:]):
-            fetch_status, fetched = client.fetch(message_id, "(RFC822)")
+            fetch_status, fetched = client.uid("fetch", message_id, "(RFC822)")
             if fetch_status != "OK":
                 continue
-            raw = b"".join(
-                item[1] for item in fetched if isinstance(item, tuple) and len(item) == 2
+            raw = b"".join(item[1] for item in fetched if isinstance(item, tuple) and len(item) == 2)
+            if not raw:
+                continue
+            message = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(raw))
+            parsed = _parse_eligible_draft(
+                message,
+                mailbox_account=username,
+                folder_uidvalidity=folder_uidvalidity,
+                message_uid=message_id.decode("ascii", errors="replace"),
             )
-            if raw:
-                message = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(raw))
-                if _draft_envelope_valid(message):
-                    return True, True
-        return True, False
+            if parsed is not None:
+                return parsed
+        return None
+
+
+def _retrieve_draft() -> tuple[bool, bool]:
+    try:
+        return True, _retrieve_eligible_draft() is not None
+    except (KeyError, OSError, ValueError, imaplib.IMAP4.error):
+        return False, False
 
 
 def _send_owned_test() -> bool:

@@ -359,6 +359,7 @@ def test_probe_evidence_requires_matching_probe_name(tmp_path: Path, monkeypatch
 def test_mail_probe_accepts_only_the_required_draft_envelope(monkeypatch) -> None:
     monkeypatch.setenv("PEEL_OWNED_RECIPIENT", "owned@example.com")
     message = mail_gate_probe.EmailMessage()
+    message["From"] = "sender@example.com"
     message["Subject"] = "Disclosure draft"
     message["To"] = "owned@example.com"
     message.set_content("Intended disclosure: the recipient may receive this workbook.")
@@ -370,6 +371,16 @@ def test_mail_probe_accepts_only_the_required_draft_envelope(monkeypatch) -> Non
     )
 
     assert mail_gate_probe._draft_envelope_valid(message) is True
+    parsed = mail_gate_probe._parse_eligible_draft(
+        message,
+        mailbox_account="sender@example.com",
+        folder_uidvalidity="uidvalidity-1",
+        message_uid="42",
+    )
+    assert parsed is not None
+    assert parsed.attachment_filename == "disclosure.xlsx"
+    assert parsed.attachment_bytes == b"xlsx bytes"
+    assert parsed.message_uid == "42"
 
     nested_attachment = mail_gate_probe.EmailMessage()
     nested_attachment.set_content("nested attachment")

@@ -1,3 +1,5 @@
+import { appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 import { unzipSync } from "fflate";
@@ -163,6 +165,121 @@ export class FakeDisclosureMailer implements DisclosureMailer {
     const outcome = this.nextOutcome;
     this.nextOutcome = "accepted";
     return outcome;
+  }
+}
+
+interface BridgeResponse {
+  result?: unknown;
+  status?: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function runPythonBridge(script: string, input: unknown): BridgeResponse {
+  const result = spawnSync(
+    process.env.PEEL_PYTHON_BIN ?? "python3",
+    [script],
+    {
+      cwd: process.cwd(),
+      input: JSON.stringify(input),
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    throw new Error("external adapter failed");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    throw new Error("external adapter returned invalid JSON");
+  }
+  if (!isRecord(parsed)) throw new Error("external adapter returned an invalid response");
+  return parsed;
+}
+
+export class DaytonaWorkbookEngine implements EngineAdapter {
+  private readonly bridgePath: string;
+
+  constructor(
+    private readonly artifacts: ArtifactStore,
+    bridgePath = process.env.PEEL_DAYTONA_BRIDGE ?? "scripts/daytona_engine_bridge.py",
+  ) {
+    this.bridgePath = bridgePath;
+  }
+
+  scan(reference: ArtifactReference): EngineScanResult {
+    return this.invoke("scan", reference) as EngineScanResult;
+  }
+
+  verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult {
+    return this.invoke("verify", reference, originalArtifactSha256) as EngineVerifyResult;
+  }
+
+  private invoke(
+    operation: "scan" | "verify",
+    reference: ArtifactReference,
+    originalArtifactSha256?: string,
+  ): unknown {
+    const bytes = this.artifacts.read(reference);
+    const response = runPythonBridge(this.bridgePath, {
+      operation,
+      artifact: {
+        filename: reference.filename,
+        byte_size: reference.byte_size,
+        sha256: reference.sha256,
+      },
+      bytes_base64: Buffer.from(bytes).toString("base64"),
+      ...(originalArtifactSha256 ? { original_artifact_sha256: originalArtifactSha256 } : {}),
+    });
+    if (!isRecord(response.result)) throw new Error("Daytona engine returned no result");
+    return response.result;
+  }
+}
+
+export class SmtpDisclosureMailer implements DisclosureMailer {
+  private readonly bridgePath: string;
+
+  constructor(
+    bridgePath = process.env.PEEL_SMTP_BRIDGE ?? "scripts/smtp_delivery_bridge.py",
+  ) {
+    this.bridgePath = bridgePath;
+  }
+
+  deliver(message: DisclosureMessage, idempotencyKey: string): DeliveryOutcome {
+    if (
+      message.bytes.byteLength !== message.attachment.byte_size ||
+      sha256(message.bytes) !== message.attachment.sha256
+    ) {
+      throw new ArtifactError("integrity_failure");
+    }
+    this.recordInvocation();
+    const response = runPythonBridge(this.bridgePath, {
+      idempotency_key: idempotencyKey,
+      sender: message.sender,
+      recipient: message.recipient,
+      subject: message.subject,
+      body: message.body,
+      attachment: {
+        filename: message.attachment.filename,
+        media_type: message.attachment.media_type,
+        sha256: message.attachment.sha256,
+      },
+      bytes_base64: Buffer.from(message.bytes).toString("base64"),
+    });
+    if (response.status === "accepted") return "accepted";
+    if (response.status === "rejected") return "rejected";
+    if (response.status === "ambiguous") return "ambiguous";
+    throw new Error("SMTP bridge returned an invalid outcome");
+  }
+
+  private recordInvocation(): void {
+    const auditPath = process.env.PEEL_SMTP_AUDIT_FILE;
+    if (!auditPath) return;
+    appendFileSync(auditPath, "delivery_invocation\n", { encoding: "utf8" });
   }
 }
 
