@@ -189,6 +189,48 @@ def test_github_probe_uses_resolved_executable_path(monkeypatch) -> None:
     assert all(command[0] == "/opt/tools/gh" for command in calls)
 
 
+def test_github_probe_accepts_qodo_clean_canonical_comment_without_new_review_object(
+    monkeypatch,
+) -> None:
+    def command_path(name: str) -> str | None:
+        return "/opt/tools/gh" if name == "gh" else None
+
+    def capture(command, timeout=8.0):
+        if command[1:3] == ["api", "user"]:
+            return True, "", ""
+        if command[1:3] == ["api", "repos/sivaratrisrinivas/peel"]:
+            return True, "false\n", ""
+        if any("pulls/11" in item for item in command) and not any(
+            "reviews" in item for item in command
+        ):
+            return True, '{"number":11,"state":"open","head_sha":"abc123"}\n', ""
+        if any("pulls/11/reviews" in item for item in command):
+            return True, "", ""
+        if any("issues/11/comments" in item for item in command):
+            return True, json.dumps(
+                {
+                    "id": 2,
+                    "created_at": "2026-08-28T04:00:00Z",
+                    "updated_at": "2026-08-28T04:00:00Z",
+                    "login": "qodo-code-review[bot]",
+                    "body": "<h3>Code Review by Qodo</h3> abc123",
+                }
+            ) + "\n", ""
+        raise AssertionError(command)
+
+    monkeypatch.setattr(environment_gate, "_command_path", command_path)
+    monkeypatch.setattr(environment_gate, "_capture", capture)
+
+    gate = environment_gate._probe_github_qodo(
+        "sivaratrisrinivas/peel", offline=False, pull_request_number=11, expected_commit="abc123"
+    )
+
+    assert gate["status"] == "pass"
+    assert gate["evidence"]["qodo_review_found"] is True
+    assert gate["evidence"]["qodo_review_commit_verified"] is True
+    assert gate["evidence"]["qodo_review_comment_commit_verified"] is True
+
+
 def test_qodo_findings_must_be_resolved_for_target_commit() -> None:
     resolved = [
         {

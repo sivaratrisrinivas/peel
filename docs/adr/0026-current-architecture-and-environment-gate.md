@@ -28,7 +28,7 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| GitHub and Qodo | Public repository access and a Qodo review on the repository | Pass — public access, the configured target PR at the current checkout commit, and the final Qodo review with all findings resolved were verified |
+| GitHub and Qodo | Public repository access and a Qodo review publication on the repository | Pass — public access, the configured target PR at the current checkout commit, and the final exact-commit Qodo Code Review publication with all findings resolved were verified; clean comment updates are valid when no new GitHub review object is emitted |
 | TrueForge and Cerebras | Serial tool loop with a configured Cerebras model, native approval denial, and zero side effects | Pass — the returned runtime identity and `gemma-4-31b` live TrueForge probe passed; `gpt-oss-120b` remains the preferred recheck target after the TrueForge runtime compatibility issue is resolved |
 | Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Pass — the live Python SDK probe completed the full lifecycle and hash check |
 | Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Pass — the live IMAP/SMTP probe validated the strict draft envelope and completed one owned-recipient delivery |

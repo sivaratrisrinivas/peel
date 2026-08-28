@@ -2,7 +2,7 @@
 
 The environment gate accepts mandatory integration evidence only from versioned JSON records produced by an explicit live probe. Credentials, message bodies, workbook values, command output, and sandbox paths must not be copied into a record.
 
-Set these local, ignored variables before running the gate. The final live run also supplies the target PR with `--pull-request`; the gate verifies that PR is open at the current checkout commit and has a fully resolved Qodo review for that exact commit.
+Set these local, ignored variables before running the gate. The final live run also supplies the target PR with `--pull-request`; the gate verifies that PR is open at the current checkout commit and has a fully resolved Qodo review publication for that exact commit. Qodo's canonical Code Review comment is accepted for clean reviews because Qodo may update that comment without creating a new GitHub review object; when an API review object exists, its state and commit are checked too.
 
 ```text
 PEEL_TRUEFORGE_EVIDENCE_FILE=/tmp/peel-trueforge-evidence.json

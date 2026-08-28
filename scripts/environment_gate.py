@@ -188,8 +188,10 @@ def _env_present(names: Sequence[str]) -> bool:
     return all(bool(os.environ.get(name)) for name in names)
 
 
-def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool:
-    """Require the newest canonical Qodo review for the target commit to be resolved."""
+def _canonical_qodo_reviews(
+    comments: list[dict[str, Any]], commit: str
+) -> list[tuple[str, int, list[str]]]:
+    """Return canonical Qodo reviews for a target commit without exposing their bodies."""
 
     finding_summaries = re.compile(r"<summary>\s+\d+\.\s+.*?</summary>", re.DOTALL)
     candidates: list[tuple[str, int, list[str]]] = []
@@ -210,6 +212,13 @@ def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool
             timestamp = ""
         comment_id = comment.get("id")
         candidates.append((timestamp, comment_id if isinstance(comment_id, int) else -1, summaries))
+    return candidates
+
+
+def _qodo_findings_resolved(comments: list[dict[str, Any]], commit: str) -> bool:
+    """Require the newest canonical Qodo review for the target commit to be resolved."""
+
+    candidates = _canonical_qodo_reviews(comments, commit)
     if not candidates:
         return False
     _, _, latest_summaries = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
@@ -234,6 +243,8 @@ def _probe_github_qodo(
         "head_commit_verified": False,
         "qodo_review_found": False,
         "qodo_review_commit_verified": False,
+        "qodo_review_comment_found": False,
+        "qodo_review_comment_commit_verified": False,
         "qodo_findings_resolved": False,
     }
 
@@ -354,8 +365,7 @@ def _probe_github_qodo(
         for record in review_records
         if isinstance(record.get("login"), str) and "qodo" in record["login"].lower()
     ]
-    evidence["qodo_review_found"] = bool(qodo_reviews)
-    evidence["qodo_review_commit_verified"] = any(
+    qodo_api_commit_verified = any(
         record.get("commit_id") == expected_commit
         and record.get("state") in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
         for record in qodo_reviews
@@ -384,7 +394,20 @@ def _probe_github_qodo(
                 continue
             if isinstance(comment, dict):
                 comments.append(comment)
+    canonical_comments = _canonical_qodo_reviews(comments, expected_commit)
+    evidence["qodo_review_comment_found"] = bool(canonical_comments)
+    evidence["qodo_review_comment_commit_verified"] = bool(canonical_comments)
     evidence["qodo_findings_resolved"] = _qodo_findings_resolved(comments, expected_commit)
+
+    # Qodo publishes clean reviews by updating its canonical Code Review issue
+    # comment; GitHub does not always create a corresponding /reviews object
+    # for that update. Prefer the API review identity when available, while
+    # accepting the exact-commit canonical comment as the published review for
+    # clean results. The separate findings check still rejects unresolved work.
+    evidence["qodo_review_found"] = bool(qodo_reviews) or bool(canonical_comments)
+    evidence["qodo_review_commit_verified"] = (
+        qodo_api_commit_verified or bool(canonical_comments)
+    )
 
     status = "pass" if all(
         evidence[key]
