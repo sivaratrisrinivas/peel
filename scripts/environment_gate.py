@@ -25,6 +25,7 @@ from typing import Any, Sequence
 
 REPO_DEFAULT = "sivaratrisrinivas/peel"
 SCHEMA_VERSION = "1"
+SUPPORTED_TRUEFORGE_CEREBRAS_MODELS = {"gpt-oss-120b", "gemma-4-31b"}
 
 
 def _capture(command: Sequence[str], timeout: float = 8.0) -> tuple[bool, str, str]:
@@ -313,7 +314,7 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
         "side_effects_observed": _evidence_bool(proof, "side_effects_observed"),
         "parallel_tool_calls": proof.get("parallel_tool_calls") is False,
         "response_format_on_tool_turn": _evidence_bool(proof, "response_format_on_tool_turn"),
-        "model_name": _evidence_string(proof, "model_name") == "gpt-oss-120b",
+        "model_name": _evidence_string(proof, "model_name") in SUPPORTED_TRUEFORGE_CEREBRAS_MODELS,
         "provider_base_url": _evidence_string(proof, "provider_base_url") == "https://api.cerebras.ai/v1",
     }
     evidence = {

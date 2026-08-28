@@ -231,6 +231,10 @@ def test_live_proof_records_can_clear_integration_gates(monkeypatch, tmp_path: P
     monkeypatch.setattr(environment_gate, "_run", lambda command, timeout=8.0: True)
 
     assert environment_gate._probe_trueforge_cerebras()["status"] == "pass"
+    proof = json.loads(trueforge_file.read_text(encoding="utf-8"))
+    proof["model_name"] = "gemma-4-31b"
+    trueforge_file.write_text(json.dumps(proof), encoding="utf-8")
+    assert environment_gate._probe_trueforge_cerebras()["status"] == "pass"
     assert environment_gate._probe_daytona()["status"] == "pass"
     assert environment_gate._probe_owned_mail()["status"] == "pass"
 

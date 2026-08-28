@@ -18,6 +18,8 @@ The Python workbook engine communicates through a versioned, strict JSON contrac
 
 Cerebras Scope Assessment is a one-way advisory veto. `mismatch`, `insufficient_context`, model failure, stale identity, or missing evidence blocks progress. A positive result means only that no mismatch was found in bounded evidence; it is never proof of safety or permission. Reveal values remain outside TrueForge, Cerebras, tool transcripts, logs, reports, SQLite, and repaired artifacts. If a private, short-lived local Reveal path cannot be proven, sensitive Reveal values are cut and only metadata remains.
 
+The TrueForge/Cerebras gate uses an explicitly configured Cerebras custom model and records the model actually exercised. `gpt-oss-120b` remains the preferred model; the current TrueForge 0.1.4 runtime probe also supports the configured `gemma-4-31b` fallback because the preferred model's deferred-tool continuation returned HTTP 400. Selecting the fallback is valid only after the same serial-tool, native-denial, and zero-side-effect proof passes; it is not a silent provider substitution.
+
 The supported claim is limited to mechanisms that Peel supports and successfully executes. Unknown or unsupported content-bearing workbook features, unproven fidelity, or failed Verification produce Refusal rather than a globally “clean” result. Untouched OOXML ZIP members remain byte-identical; changed members receive targeted semantic checks.
 
 ## Environment gate
@@ -26,15 +28,15 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
-| GitHub and Qodo | Public repository access and a Qodo review on the repository | Fail — the connector proved public access, but no Qodo-reviewed pull request exists; local `gh` authentication is unavailable |
-| TrueForge and Cerebras | Serial tool loop with `gpt-oss-120b`, native approval denial, and zero side effects | Fail — no runtime proof |
-| Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Fail — no runtime proof |
-| Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Fail — the Gmail connector returned owned-account draft metadata, but provider-neutral IMAP retrieval and SMTP delivery were not proved |
+| GitHub and Qodo | Public repository access and a Qodo review on the repository | Fail — the current host's `gh` token is invalid; re-authentication is required for the final live gate |
+| TrueForge and Cerebras | Serial tool loop with a configured Cerebras model, native approval denial, and zero side effects | Pass — `gemma-4-31b` completed the live TrueForge probe; `gpt-oss-120b` remains the preferred recheck target after the TrueForge runtime compatibility issue is resolved |
+| Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Pass — the live Python SDK probe completed the full lifecycle and hash check |
+| Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Pass — the live IMAP/SMTP probe validated the strict draft envelope and completed one owned-recipient delivery |
 | Sensitive Reveal | Private transcript/retention path | Cut — metadata-only policy applies until proven |
-| LibreOffice | Availability for supported-profile reopen checks | Pass — temporary user-local bundle; system package remains unavailable |
+| LibreOffice | Availability for supported-profile reopen checks | Cut — the current host has no available LibreOffice binary; the dependent route remains out of scope |
 | Pivot fixture | Inspected trusted package with the required pivot-cache structures | Cut — no trusted fixture is present |
 
-Any mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.
+The current consolidated decision is `NO-GO` solely because GitHub authentication prevented the public-repository/Qodo probe from completing on this host. Any mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.
 
 ## Consequences
 
