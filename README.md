@@ -126,7 +126,6 @@ non-empty subject, and one non-empty `Intended disclosure:` field.
 Run the consolidated check from the checkout under review:
 
 ```bash
-SMTP_USERNAME="$YOUR_OWNED_SMTP_ADDRESS" \
 PEEL_TRUEFORGE_EVIDENCE_FILE=/tmp/peel-trueforge-evidence.json \
 PEEL_DAYTONA_EVIDENCE_FILE=/tmp/peel-daytona-evidence.json \
 PEEL_MAIL_EVIDENCE_FILE=/tmp/peel-mail-evidence.json \
