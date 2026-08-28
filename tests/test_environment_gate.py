@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -10,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import environment_gate
+from scripts import daytona_gate_probe
 from scripts import mail_gate_probe
 
 
@@ -114,13 +116,22 @@ def test_dotenv_loader_accepts_values_without_executing_shell(monkeypatch, tmp_p
     dotenv.write_text(
         "export IMAP_HOST=imap.gmail.com\n"
         "SMTP_HOST=\"smtp.gmail.com\\r\"\n"
+        "ESCAPED_CRLF=value\\r\\n\n"
         "INVALID-NAME=ignored\n",
         encoding="utf-8",
     )
 
     monkeypatch.delenv("IMAP_HOST", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
-    environment_gate._load_dotenv(dotenv)
+    loaders: tuple[Callable[[Path], None], ...] = (
+        environment_gate._load_dotenv,
+        daytona_gate_probe._load_dotenv,
+        mail_gate_probe._load_dotenv,
+    )
+    for loader in loaders:
+        monkeypatch.delenv("ESCAPED_CRLF", raising=False)
+        loader(dotenv)
+        assert os.environ["ESCAPED_CRLF"] == "value"
 
     assert os.environ["IMAP_HOST"] == "imap.gmail.com"
     assert os.environ["SMTP_HOST"] == "smtp.gmail.com"
