@@ -1,6 +1,7 @@
 import {
   API_VERSION,
   ENGINE_VERSION,
+  REVEAL_TTL_MS,
   type ApiResponse,
   type ArtifactReference,
   type Clock,
@@ -10,7 +11,12 @@ import {
   type ErrorResponse,
   type EngineScanResult,
   type EngineVerifyResult,
+  type RevealReference,
+  type RevealRow,
+  type RevealSample,
   type RunView,
+  type ScopeAssessmentEvidence,
+  type ScopeAssessor,
   type SuccessResponse,
 } from "./contracts.js";
 import {
@@ -19,6 +25,7 @@ import {
   FakeWorkbookEngine,
   InMemoryArtifactStore,
   SystemClock,
+  UnavailableScopeAssessor,
 } from "./adapters.js";
 import { disclosureBinding, disclosureFingerprint, envelopeRevisionHash, newId, runKey, sha256, canonicalJson } from "./identity.js";
 import { RunStore, toScanEvidence, toVerificationEvidence, type StoredRun } from "./store.js";
@@ -26,6 +33,7 @@ import {
   parseCommand,
   parseEngineScanResult,
   parseEngineVerifyResult,
+  parseScopeAssessmentResult,
   SchemaError,
 } from "./schema.js";
 import type {
@@ -43,12 +51,20 @@ interface InMemoryEnvelope {
   envelope: Envelope;
 }
 
+interface EphemeralReveal {
+  reference: RevealReference;
+  artifact_sha256: string;
+  rows: RevealRow[];
+}
+
 export interface PeelDaemonOptions {
   allowedRecipients: readonly string[];
   artifactStore?: ArtifactStore;
   clock?: Clock;
   disclosureMailer?: DisclosureMailer;
   engine?: EngineAdapter;
+  scopeAssessor?: ScopeAssessor;
+  revealEnabled?: boolean;
   databasePath?: string;
 }
 
@@ -83,7 +99,7 @@ function artifactFailureCode(error: unknown): string {
   return "artifact_integrity_failure";
 }
 
-function publicRun(run: StoredRun): RunView {
+function publicRun(run: StoredRun, reveals: readonly RevealReference[] = []): RunView {
   const view: RunView = {
     run_id: run.run_id,
     revision: run.revision,
@@ -92,13 +108,19 @@ function publicRun(run: StoredRun): RunView {
     artifact: run.artifact,
   };
   if (run.scan) view.scan = toScanEvidence(run.scan);
+  if (run.scope_assessment) view.scope_assessment = run.scope_assessment;
+  if (reveals.length > 0) view.reveals = [...reveals];
   if (run.verification) view.verification = toVerificationEvidence(run.verification);
   if (run.delivery) view.delivery = run.delivery;
   return view;
 }
 
-function success(run: StoredRun, extra: Pick<SuccessResponse, "approval" | "deduplicated"> = {}): SuccessResponse {
-  const response: SuccessResponse = { version: API_VERSION, ok: true, run: publicRun(run) };
+function success(
+  run: StoredRun,
+  extra: Pick<SuccessResponse, "approval" | "deduplicated"> = {},
+  reveals: readonly RevealReference[] = [],
+): SuccessResponse {
+  const response: SuccessResponse = { version: API_VERSION, ok: true, run: publicRun(run, reveals) };
   if (extra.approval) response.approval = extra.approval;
   if (extra.deduplicated !== undefined) response.deduplicated = extra.deduplicated;
   return response;
@@ -110,9 +132,13 @@ export class PeelDaemon {
 
   private readonly clock: Clock;
   private readonly engine: EngineAdapter;
+  private readonly scopeAssessor: ScopeAssessor;
   private readonly store: RunStore;
   private readonly allowedRecipients: ReadonlySet<string>;
   private readonly envelopes = new Map<string, InMemoryEnvelope>();
+  private readonly reveals = new Map<string, EphemeralReveal>();
+  private readonly revealTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly revealEnabled: boolean;
 
   constructor(options: PeelDaemonOptions) {
     if (options.allowedRecipients.length === 0) throw new Error("at least one allowed recipient is required");
@@ -120,18 +146,23 @@ export class PeelDaemon {
     this.artifactStore = options.artifactStore ?? new InMemoryArtifactStore(this.clock);
     this.disclosureMailer = options.disclosureMailer ?? new FakeDisclosureMailer();
     this.engine = options.engine ?? new FakeWorkbookEngine(this.artifactStore);
+    this.scopeAssessor = options.scopeAssessor ?? new UnavailableScopeAssessor();
     this.store = new RunStore(options.databasePath ?? ":memory:");
     this.store.recoverAfterRestart(this.clock.now());
     this.allowedRecipients = new Set(options.allowedRecipients.map((recipient) => recipient.toLowerCase()));
+    this.revealEnabled = options.revealEnabled === true;
   }
 
   close(): void {
+    this.reveals.clear();
+    for (const timer of this.revealTimers.values()) clearTimeout(timer);
+    this.revealTimers.clear();
     this.store.close();
   }
 
   getRun(runId: string): RunView | undefined {
     const run = this.store.getRun(runId);
-    return run ? publicRun(run) : undefined;
+    return run ? publicRun(run, this.revealReferencesForRun(run)) : undefined;
   }
 
   uploadArtifact(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference {
@@ -150,7 +181,7 @@ export class PeelDaemon {
     const previous = this.store.getCommand(command.command_id);
     if (previous) {
       if (previous.request_hash !== requestHash) return this.error("command_replay_conflict");
-      return JSON.parse(previous.response_json) as ApiResponse;
+      return this.refreshCachedResponse(JSON.parse(previous.response_json) as ApiResponse);
     }
 
     let response: ApiResponse;
@@ -217,6 +248,7 @@ export class PeelDaemon {
         artifact: envelope.attachment,
       };
       this.store.reviseRun(current.run_id, revised, this.clock.now());
+      this.clearReveals(current.run_id);
       this.envelopes.set(current.run_id, { runId: current.run_id, revision: revised.revision, envelope });
       return success(this.mustGetRun(current.run_id));
     }
@@ -257,9 +289,44 @@ export class PeelDaemon {
       this.store.setState(run.run_id, "refused", this.clock.now(), result);
       return this.error("artifact_identity_mismatch", this.mustGetRun(run.run_id));
     }
-    const nextState: RunState = result.status === "clean" ? "scanned" : "refused";
-    this.store.setState(run.run_id, nextState, this.clock.now(), result);
-    return success(this.mustGetRun(run.run_id));
+    if (result.status === "clean") {
+      this.store.setState(run.run_id, "scanned", this.clock.now(), result);
+      return success(this.mustGetRun(run.run_id));
+    }
+    if (result.status === "refused") {
+      this.store.setState(run.run_id, "refused", this.clock.now(), result);
+      return success(this.mustGetRun(run.run_id));
+    }
+
+    let scopeAssessment: ScopeAssessmentEvidence;
+    const heldEnvelope = this.envelopes.get(run.run_id);
+    if (!heldEnvelope || heldEnvelope.revision !== run.revision) {
+      scopeAssessment = { status: "insufficient_context" };
+    } else {
+      try {
+        const claimedScope = parseClaimedScope(heldEnvelope.envelope.body);
+        const assessed = parseScopeAssessmentResult(this.scopeAssessor.assess({
+          claimed_scope: claimedScope,
+          findings: result.findings,
+        }));
+        scopeAssessment = { status: assessed.status };
+      } catch {
+        this.store.setState(run.run_id, "refused", this.clock.now(), result);
+        return this.error("scope_assessment_failed", this.mustGetRun(run.run_id));
+      }
+    }
+
+    this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+    const refusedRun = this.mustGetRun(run.run_id);
+    this.prepareReveals(refusedRun, result.findings);
+    const publicRefusedRun = this.mustGetRun(run.run_id);
+    if (scopeAssessment.status === "mismatch") {
+      return this.error("scope_mismatch", publicRefusedRun);
+    }
+    if (scopeAssessment.status === "insufficient_context") {
+      return this.error("scope_insufficient_context", publicRefusedRun);
+    }
+    return success(publicRefusedRun, {}, this.revealReferencesForRun(publicRefusedRun));
   }
 
   private verify(command: Extract<Command, { command: "verify" }>): ApiResponse {
@@ -435,8 +502,133 @@ export class PeelDaemon {
       ok: false,
       error: { code, message: publicErrorMessage(code) },
     };
-    if (run) response.run = publicRun(run);
+    if (run) response.run = publicRun(run, this.revealReferencesForRun(run));
     return response;
+  }
+
+  private refreshCachedResponse(response: ApiResponse): ApiResponse {
+    const runId = response.ok ? response.run.run_id : response.run?.run_id;
+    if (!runId) return response;
+    const run = this.store.getRun(runId);
+    if (!run) return response;
+    const refreshedRun = publicRun(run, this.revealReferencesForRun(run));
+    return { ...response, run: refreshedRun };
+  }
+
+  readReveal(runId: string, reference: string): RevealSample | undefined {
+    const stored = this.reveals.get(reference);
+    if (!stored) return undefined;
+    const run = this.store.getRun(runId);
+    if (
+      !run ||
+      run.run_id !== stored.reference.run_id ||
+      run.revision !== stored.reference.revision ||
+      run.artifact.sha256 !== stored.artifact_sha256
+    ) {
+      this.deleteReveal(reference);
+      return undefined;
+    }
+    try {
+      this.artifactStore.read(run.artifact);
+    } catch {
+      this.deleteReveal(reference);
+      return undefined;
+    }
+    const expiresAt = Date.parse(stored.reference.expires_at);
+    if (!Number.isFinite(expiresAt) || this.clock.now() >= expiresAt) {
+      this.deleteReveal(reference);
+      return undefined;
+    }
+    return {
+      run_id: stored.reference.run_id,
+      revision: stored.reference.revision,
+      finding_index: stored.reference.finding_index,
+      expires_at: stored.reference.expires_at,
+      rows: stored.rows.map((row) => ({ ...row, values: [...row.values] })),
+    };
+  }
+
+  private prepareReveals(run: StoredRun, findings: readonly Finding[]): void {
+    this.clearReveals(run.run_id);
+    const reveal = this.engine.reveal;
+    if (!this.revealEnabled || !reveal) return;
+    findings.forEach((finding, findingIndex) => {
+      let rows: RevealRow[];
+      try {
+        rows = reveal.call(this.engine, run.artifact, finding);
+      } catch {
+        return;
+      }
+      if (!Array.isArray(rows)) return;
+      const safeRows = rows.slice(0, 5)
+        .filter((row): row is RevealRow => (
+          row !== null &&
+          typeof row === "object" &&
+          typeof row.worksheet === "string" &&
+          row.worksheet.length > 0 &&
+          Number.isSafeInteger(row.row) &&
+          row.row >= 1 &&
+          Array.isArray(row.values) &&
+          row.values.every((value) => typeof value === "string")
+        ))
+        .map((row) => ({
+          worksheet: row.worksheet,
+          row: row.row,
+          values: [...row.values],
+        }));
+      if (safeRows.length === 0) return;
+      const reference = `peel-reveal-${newId()}`;
+      const expiresAt = this.clock.now() + REVEAL_TTL_MS;
+      this.reveals.set(reference, {
+        reference: {
+          reference,
+          run_id: run.run_id,
+          revision: run.revision,
+          finding_index: findingIndex,
+          row_count: safeRows.length,
+          expires_at: isoTime(expiresAt),
+        },
+        artifact_sha256: run.artifact.sha256,
+        rows: safeRows,
+      });
+      const timer = setTimeout(() => {
+        const current = this.reveals.get(reference);
+        if (current?.reference.expires_at === isoTime(expiresAt)) this.reveals.delete(reference);
+        this.revealTimers.delete(reference);
+      }, REVEAL_TTL_MS);
+      timer.unref?.();
+      this.revealTimers.set(reference, timer);
+    });
+  }
+
+  private revealReferencesForRun(run: StoredRun): RevealReference[] {
+    const active: RevealReference[] = [];
+    for (const [key, reveal] of this.reveals) {
+      if (reveal.reference.run_id !== run.run_id) continue;
+      if (this.clock.now() >= Date.parse(reveal.reference.expires_at)) {
+        this.deleteReveal(key);
+        continue;
+      }
+      if (reveal.reference.revision === run.revision && reveal.artifact_sha256 === run.artifact.sha256) {
+        active.push(reveal.reference);
+      } else {
+        this.deleteReveal(key);
+      }
+    }
+    return active.sort((left, right) => left.finding_index - right.finding_index);
+  }
+
+  private clearReveals(runId: string): void {
+    for (const [key, reveal] of this.reveals) {
+      if (reveal.reference.run_id === runId) this.deleteReveal(key);
+    }
+  }
+
+  private deleteReveal(reference: string): void {
+    this.reveals.delete(reference);
+    const timer = this.revealTimers.get(reference);
+    if (timer) clearTimeout(timer);
+    this.revealTimers.delete(reference);
   }
 }
 
@@ -465,9 +657,18 @@ function publicErrorMessage(code: string): string {
     invalid_engine_result: "The workbook engine returned an invalid versioned result.",
     engine_failed: "The workbook engine could not produce a result.",
     artifact_identity_mismatch: "The engine result does not match the bound artifact.",
+    scope_mismatch: "The Claimed Scope does not match the bounded Finding evidence; the Run was refused.",
+    scope_insufficient_context: "The Claimed Scope could not be assessed with sufficient context; the Run was refused.",
+    scope_assessment_failed: "Scope Assessment could not be completed; the Run was refused.",
     command_failed: "The command could not be completed safely.",
   };
   return messages[code] ?? "The command was refused safely.";
 }
 
-export { FakeClock, FakeDisclosureMailer, InMemoryArtifactStore } from "./adapters.js";
+export {
+  FakeClock,
+  FakeDisclosureMailer,
+  FakeScopeAssessor,
+  InMemoryArtifactStore,
+  UnavailableScopeAssessor,
+} from "./adapters.js";

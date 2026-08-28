@@ -1,6 +1,7 @@
 export const API_VERSION = "1" as const;
 export const ENGINE_VERSION = "1.0.0" as const;
 export const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+export const REVEAL_TTL_MS = 60 * 1000;
 
 export type RunState =
   | "staged"
@@ -109,6 +110,50 @@ export interface Finding {
   count: number;
 }
 
+export type ScopeAssessmentStatus = "mismatch" | "insufficient_context" | "no_mismatch_found";
+
+export interface ScopeAssessmentInput {
+  claimed_scope: string;
+  findings: Finding[];
+}
+
+export interface ScopeAssessmentResult {
+  version: typeof API_VERSION;
+  operation: "scope_assessment";
+  status: ScopeAssessmentStatus;
+}
+
+export interface ScopeAssessor {
+  assess(input: ScopeAssessmentInput): ScopeAssessmentResult;
+}
+
+export interface ScopeAssessmentEvidence {
+  status: ScopeAssessmentStatus;
+}
+
+export interface RevealRow {
+  worksheet: string;
+  row: number;
+  values: string[];
+}
+
+export interface RevealReference {
+  reference: string;
+  run_id: string;
+  revision: number;
+  finding_index: number;
+  row_count: number;
+  expires_at: string;
+}
+
+export interface RevealSample {
+  run_id: string;
+  revision: number;
+  finding_index: number;
+  expires_at: string;
+  rows: RevealRow[];
+}
+
 export interface EngineScanResult {
   version: typeof API_VERSION;
   operation: "scan";
@@ -138,6 +183,7 @@ export interface ScanEvidence {
   artifact_sha256: string;
   engine_version: string;
   finding_count: number;
+  findings: Finding[];
   supported_profile: "accepted" | "refused";
   refusal_code?: string;
 }
@@ -166,6 +212,8 @@ export interface RunView {
   envelope_revision_hash: string;
   artifact: ArtifactReference;
   scan?: ScanEvidence;
+  scope_assessment?: ScopeAssessmentEvidence;
+  reveals?: RevealReference[];
   verification?: VerificationEvidence;
   delivery?: DeliveryEvidence;
 }
@@ -209,6 +257,7 @@ export interface ArtifactStore {
 export interface EngineAdapter {
   scan(reference: ArtifactReference): EngineScanResult;
   verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult;
+  reveal?(reference: ArtifactReference, finding: Finding): RevealRow[];
 }
 
 export interface DisclosureMessage {

@@ -15,6 +15,11 @@ import {
   type EngineScanResult,
   type EngineVerifyResult,
   type Finding,
+  type RevealRow,
+  type ScopeAssessor,
+  type ScopeAssessmentInput,
+  type ScopeAssessmentResult,
+  type ScopeAssessmentStatus,
 } from "./contracts.js";
 import { sha256 } from "./identity.js";
 
@@ -58,6 +63,34 @@ export class FakeClock implements Clock {
 export class SystemClock implements Clock {
   now(): number {
     return Date.now();
+  }
+}
+
+export class FakeScopeAssessor implements ScopeAssessor {
+  failNext = false;
+
+  constructor(private readonly status: ScopeAssessmentStatus = "no_mismatch_found") {}
+
+  assess(_input: ScopeAssessmentInput): ScopeAssessmentResult {
+    if (this.failNext) {
+      this.failNext = false;
+      throw new Error("scope assessment failed");
+    }
+    return {
+      version: "1",
+      operation: "scope_assessment",
+      status: this.status,
+    };
+  }
+}
+
+export class UnavailableScopeAssessor implements ScopeAssessor {
+  assess(_input: ScopeAssessmentInput): ScopeAssessmentResult {
+    return {
+      version: "1",
+      operation: "scope_assessment",
+      status: "insufficient_context",
+    };
   }
 }
 
@@ -181,6 +214,90 @@ function hiddenFindings(workbook: Uint8Array, files: Record<string, Uint8Array>)
   return findings;
 }
 
+interface WorkbookSheet {
+  name: string;
+  state: string | undefined;
+  relationshipId: string;
+}
+
+function xmlAttribute(attributes: string, name: string): string | undefined {
+  const match = attributes.match(new RegExp(`(?:^|\\s)${name.replace(":", "\\:")}=["']([^"']*)["']`, "i"));
+  return match?.[1];
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function workbookSheets(workbookXml: string): WorkbookSheet[] {
+  return Array.from(workbookXml.matchAll(/<sheet\b([^>]*)\/?>(?:<\/sheet>)?/gi), (match) => ({
+    name: decodeXml(xmlAttribute(match[1]!, "name") ?? ""),
+    state: xmlAttribute(match[1]!, "state")?.toLowerCase(),
+    relationshipId: xmlAttribute(match[1]!, "r:id") ?? xmlAttribute(match[1]!, "id") ?? "",
+  }));
+}
+
+function worksheetPath(workbookRels: string, relationshipId: string): string | undefined {
+  for (const match of workbookRels.matchAll(/<Relationship\b([^>]*)\/?>(?:<\/Relationship>)?/gi)) {
+    if (xmlAttribute(match[1]!, "Id") !== relationshipId) continue;
+    const target = xmlAttribute(match[1]!, "Target");
+    if (!target) return undefined;
+    const normalized = target.replace(/^\/+/, "");
+    return normalized.startsWith("xl/") ? normalized : `xl/${normalized.replace(/^\.\//, "")}`;
+  }
+  return undefined;
+}
+
+function sharedStringValues(files: Record<string, Uint8Array>): string[] {
+  const sharedStrings = files["xl/sharedStrings.xml"];
+  if (!sharedStrings) return [];
+  const xml = new TextDecoder().decode(sharedStrings);
+  return Array.from(xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/gi), (match) => (
+    Array.from(match[1]!.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/gi), (text) => decodeXml(text[1]!)).join("")
+  ));
+}
+
+function rowValues(rowXml: string, sharedStrings: readonly string[]): string[] {
+  return Array.from(rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/gi), (match) => {
+    const attributes = match[1]!;
+    const content = match[2]!;
+    const type = xmlAttribute(attributes, "t");
+    if (type?.toLowerCase() === "inlinestr") {
+      return decodeXml(content.match(/<t\b[^>]*>([\s\S]*?)<\/t>/i)?.[1] ?? "");
+    }
+    const value = decodeXml(content.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? "");
+    if (type?.toLowerCase() === "s") {
+      const index = Number(value);
+      return Number.isSafeInteger(index) && sharedStrings[index] !== undefined ? sharedStrings[index]! : value;
+    }
+    return value;
+  });
+}
+
+function rowsFromWorksheet(
+  xml: string,
+  worksheet: string,
+  hiddenOnly: boolean,
+  sharedStrings: readonly string[],
+  maxRows: number,
+): RevealRow[] {
+  const rows: RevealRow[] = [];
+  for (const match of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/gi)) {
+    if (rows.length >= maxRows) break;
+    const attributes = match[1]!;
+    if (hiddenOnly && !/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const rowNumber = Number(xmlAttribute(attributes, "r"));
+    if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) continue;
+    rows.push({ worksheet, row: rowNumber, values: rowValues(match[2]!, sharedStrings).slice(0, 128) });
+  }
+  return rows;
+}
+
 export class FakeWorkbookEngine implements EngineAdapter {
   constructor(private readonly artifacts: ArtifactStore) {}
 
@@ -237,6 +354,37 @@ export class FakeWorkbookEngine implements EngineAdapter {
       supported_profile: "accepted",
       findings,
     };
+  }
+
+  reveal(reference: ArtifactReference, finding: Finding): RevealRow[] {
+    const bytes = this.artifacts.read(reference);
+    const files = unzipSync(bytes);
+    const workbookXml = new TextDecoder().decode(files["xl/workbook.xml"] ?? new Uint8Array());
+    const workbookRels = new TextDecoder().decode(files["xl/_rels/workbook.xml.rels"] ?? new Uint8Array());
+    const sheets = workbookSheets(workbookXml);
+    const sharedStrings = sharedStringValues(files);
+    const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryHidden");
+    const rows: RevealRow[] = [];
+
+    if (finding.mechanism === "hidden_worksheet") {
+      for (const sheet of hiddenSheets) {
+        const path = worksheetPath(workbookRels, sheet.relationshipId);
+        const worksheet = path ? files[path] : undefined;
+        if (!worksheet) continue;
+        rows.push(...rowsFromWorksheet(new TextDecoder().decode(worksheet), sheet.name, false, sharedStrings, 5 - rows.length));
+        if (rows.length >= 5) break;
+      }
+    } else if (finding.mechanism === "hidden_row_or_column") {
+      for (const sheet of sheets) {
+        const path = worksheetPath(workbookRels, sheet.relationshipId);
+        const worksheet = path ? files[path] : undefined;
+        if (!worksheet) continue;
+        rows.push(...rowsFromWorksheet(new TextDecoder().decode(worksheet), sheet.name, true, sharedStrings, 5 - rows.length));
+        if (rows.length >= 5) break;
+      }
+    }
+
+    return rows;
   }
 
   verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult {

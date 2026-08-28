@@ -8,6 +8,7 @@ import type {
   EngineVerifyResult,
   RunState,
   ScanEvidence,
+  ScopeAssessmentEvidence,
   VerificationEvidence,
 } from "./contracts.js";
 
@@ -25,6 +26,7 @@ export interface StoredRun {
   subject: string;
   artifact: ArtifactReference;
   scan?: EngineScanResult;
+  scope_assessment?: ScopeAssessmentEvidence;
   verification?: EngineVerifyResult;
   delivery?: DeliveryEvidence;
 }
@@ -92,6 +94,7 @@ export class RunStore {
         subject TEXT NOT NULL,
         artifact_json TEXT NOT NULL,
         scan_json TEXT,
+        scope_assessment_json TEXT,
         verification_json TEXT,
         delivery_json TEXT,
         created_at INTEGER NOT NULL,
@@ -137,6 +140,10 @@ export class RunStore {
       CREATE INDEX IF NOT EXISTS disclosure_fingerprint_idx
         ON disclosure_attempts(disclosure_fingerprint, status);
     `);
+    const columns = this.database.prepare("PRAGMA table_info(runs)").all() as Array<Record<string, unknown>>;
+    if (!columns.some((column) => column.name === "scope_assessment_json")) {
+      this.database.exec("ALTER TABLE runs ADD COLUMN scope_assessment_json TEXT");
+    }
   }
 
   recoverAfterRestart(now: number): void {
@@ -230,6 +237,7 @@ export class RunStore {
       this.database.prepare(`
         UPDATE runs SET revision = ?, state = ?, envelope_revision_hash = ?, body_sha256 = ?,
           sender = ?, recipient = ?, subject = ?, artifact_json = ?, scan_json = NULL,
+          scope_assessment_json = NULL,
           verification_json = NULL, delivery_json = NULL, updated_at = ? WHERE run_id = ?
       `).run(
         run.revision,
@@ -261,15 +269,21 @@ export class RunStore {
     scan?: EngineScanResult,
     verification?: EngineVerifyResult,
     delivery?: DeliveryEvidence,
+    scopeAssessment?: ScopeAssessmentEvidence,
   ): void {
     const current = this.getRun(runId);
     if (!current) throw new Error("run not found");
     this.database.prepare(`
-      UPDATE runs SET state = ?, scan_json = ?, verification_json = ?, delivery_json = ?, updated_at = ?
+      UPDATE runs SET state = ?, scan_json = ?, scope_assessment_json = ?, verification_json = ?, delivery_json = ?, updated_at = ?
       WHERE run_id = ?
     `).run(
       state,
       scan ? JSON.stringify(scan) : current.scan ? JSON.stringify(current.scan) : null,
+      scopeAssessment
+        ? JSON.stringify(scopeAssessment)
+        : current.scope_assessment
+          ? JSON.stringify(current.scope_assessment)
+          : null,
       verification ? JSON.stringify(verification) : current.verification ? JSON.stringify(current.verification) : null,
       delivery ? JSON.stringify(delivery) : current.delivery ? JSON.stringify(current.delivery) : null,
       now,
@@ -369,6 +383,7 @@ export class RunStore {
       subject: requiredString(record, "subject"),
       artifact: JSON.parse(artifactJson) as ArtifactReference,
       scan: optionalJson<EngineScanResult>(record, "scan_json"),
+      scope_assessment: optionalJson<ScopeAssessmentEvidence>(record, "scope_assessment_json"),
       verification: optionalJson<EngineVerifyResult>(record, "verification_json"),
       delivery: optionalJson<DeliveryEvidence>(record, "delivery_json"),
     };
@@ -381,6 +396,7 @@ export function toScanEvidence(scan: EngineScanResult): ScanEvidence {
     artifact_sha256: scan.artifact_sha256,
     engine_version: scan.engine_version,
     finding_count: scan.findings.length,
+    findings: scan.findings,
     supported_profile: scan.supported_profile,
   };
   if (scan.refusal_code) evidence.refusal_code = scan.refusal_code;

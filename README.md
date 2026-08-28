@@ -17,6 +17,22 @@ approval expiry, denial, duplicate delivery, and ambiguous delivery. HTTP and
 MCP expose the same command contract. The fake mail adapter records accepted
 messages but never sends mail outside the process.
 
+Issue #5 adds the first read-only concealed-data journey. The deterministic
+hidden-worksheet Attack reports mechanism, location, and count as public Finding
+metadata, applies a one-way Scope Assessment, and ends the Run in visible
+`refused` state without exposing Repair or Disclosure. `mismatch`,
+`insufficient_context`, and model failure fail closed; `no_mismatch_found` is
+only an assessment result and never authorization. Without an explicitly
+configured Scope Assessor, the daemon returns `insufficient_context` rather than
+silently treating a Finding as aligned.
+
+Sensitive Reveal values are disabled by default. A test or explicitly proven
+private local deployment may enable the short-lived Reveal path; it keeps up to
+five recovered rows per Finding in daemon memory, returns only an opaque
+Run-bound reference through the command response, and serves values only from
+`GET /v1/runs/<run-id>/reveals/<reference>`. Reveal values are not placed in
+TrueForge/MCP responses, SQLite, or persistent reports.
+
 ## Current status
 
 Issue #2 is complete. The final live gate passed on 2026-08-28 at commit

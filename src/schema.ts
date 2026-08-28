@@ -8,6 +8,7 @@ import {
   type EngineVerifyResult,
   type Envelope,
   type Finding,
+  type ScopeAssessmentResult,
   type TriggerIdentity,
 } from "./contracts.js";
 
@@ -284,4 +285,21 @@ export function parseEngineVerifyResult(value: unknown): EngineVerifyResult {
     output.refusal_code = enumValue(input.refusal_code, ["unsupported_container", "unsupported_content", "integrity_failure"] as const, "engine.refusal_code");
   }
   return output;
+}
+
+export function parseScopeAssessmentResult(value: unknown): ScopeAssessmentResult {
+  const input = record(value, "scope assessment");
+  exactKeys(input, ["version", "operation", "status"], "scope assessment");
+  if (input.version !== API_VERSION || input.operation !== "scope_assessment") {
+    throw new SchemaError("scope assessment identity is invalid");
+  }
+  return {
+    version: API_VERSION,
+    operation: "scope_assessment",
+    status: enumValue(
+      input.status,
+      ["mismatch", "insufficient_context", "no_mismatch_found"] as const,
+      "scope assessment.status",
+    ),
+  };
 }

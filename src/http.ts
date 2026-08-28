@@ -12,11 +12,22 @@ function isRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function writeJson(response: ServerResponse, status: number, value: unknown): void {
+function isLoopback(request: IncomingMessage): boolean {
+  const address = request.socket.remoteAddress;
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  value: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
   const body = JSON.stringify(value);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
+    ...extraHeaders,
   });
   response.end(body);
 }
@@ -226,6 +237,30 @@ export function createPeelHttpServer(daemon: PeelDaemon): Server {
         }
         const result = await daemon.execute(payload);
         writeJson(response, statusFor(result), result);
+        return;
+      }
+      const revealMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)\/reveals\/([^/]+)$/);
+      if (request.method === "GET" && revealMatch) {
+        if (!isLoopback(request)) {
+          writeJson(response, 403, {
+            version: API_VERSION,
+            ok: false,
+            error: { code: "reveal_private_only", message: "Reveal values are available only over the local Peel boundary." },
+          });
+          return;
+        }
+        const runId = decodeURIComponent(revealMatch[1]!);
+        const reference = decodeURIComponent(revealMatch[2]!);
+        const reveal = daemon.readReveal(runId, reference);
+        if (!reveal) {
+          writeJson(response, 404, {
+            version: API_VERSION,
+            ok: false,
+            error: { code: "reveal_not_found", message: "The Reveal Reference is missing, expired, or not bound to this Run." },
+          });
+          return;
+        }
+        writeJson(response, 200, { version: API_VERSION, ok: true, reveal }, { "cache-control": "no-store" });
         return;
       }
       if (request.method === "GET" && url.pathname.startsWith("/v1/runs/")) {
