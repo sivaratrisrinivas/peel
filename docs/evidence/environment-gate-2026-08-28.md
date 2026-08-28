@@ -1,4 +1,4 @@
-# Peel environment gate — 2026-08-28
+# Peel environment gate — initial pre-install snapshot — 2026-08-28
 
 ## Decision
 

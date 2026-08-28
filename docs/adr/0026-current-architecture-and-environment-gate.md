@@ -31,7 +31,7 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 | Daytona | Fresh sandbox, upload, declared command, hash-verified download, and destruction | Fail — no runtime proof |
 | Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Fail — no runtime proof |
 | Sensitive Reveal | Private transcript/retention path | Cut — metadata-only policy applies until proven |
-| LibreOffice | Availability for supported-profile reopen checks | Cut — unavailable on this host |
+| LibreOffice | Availability for supported-profile reopen checks | Pass — temporary user-local bundle; system package remains unavailable |
 | Pivot fixture | Inspected trusted package with the required pivot-cache structures | Cut — no trusted fixture is present |
 
 Any mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.

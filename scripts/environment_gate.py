@@ -49,6 +49,19 @@ def _run(command: Sequence[str], timeout: float = 8.0) -> bool:
     return succeeded
 
 
+def _command_path(name: str) -> str | None:
+    """Find a command on PATH or in the conventional user-local bin directory."""
+
+    return shutil.which(name) or next(
+        (
+            str(candidate)
+            for candidate in (Path.home() / ".local" / "bin" / name,)
+            if candidate.is_file() and candidate.stat().st_mode & 0o111
+        ),
+        None,
+    )
+
+
 def _gate(
     name: str,
     mandatory: bool,
@@ -75,7 +88,7 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "repo": repo,
         "offline": offline,
-        "gh_available": shutil.which("gh") is not None,
+        "gh_available": _command_path("gh") is not None,
         "authenticated": False,
         "public_repo": False,
         "qodo_review_found": False,
@@ -194,10 +207,12 @@ def _probe_github_qodo(repo: str, offline: bool) -> dict[str, Any]:
 
 def _probe_trueforge_cerebras() -> dict[str, Any]:
     credentials = _env_present(("CEREBRAS_API_KEY", "TRUEFORGE_API_KEY"))
-    adapter = any(shutil.which(command) for command in ("trueforge", "cerebras"))
+    adapter = any(_command_path(command) for command in ("trueforge", "cerebras"))
+    sdk_present = importlib.util.find_spec("cerebras.cloud.sdk") is not None
     evidence = {
         "credentials_present": credentials,
         "runtime_adapter_present": adapter,
+        "cerebras_sdk_present": sdk_present,
         "serial_tool_loop_executed": False,
         "native_denial_executed": False,
         "side_effects_observed": False,
@@ -212,10 +227,12 @@ def _probe_trueforge_cerebras() -> dict[str, Any]:
 
 
 def _probe_daytona() -> dict[str, Any]:
-    cli_present = shutil.which("daytona") is not None
+    cli_path = _command_path("daytona")
     credentials = _env_present(("DAYTONA_API_KEY",))
+    version_probe_succeeded = _run([cli_path, "version"]) if cli_path else False
     evidence = {
-        "cli_present": cli_present,
+        "cli_present": cli_path is not None,
+        "version_probe_succeeded": version_probe_succeeded,
         "credentials_present": credentials,
         "sandbox_created": False,
         "attachment_uploaded": False,
@@ -334,8 +351,11 @@ def _probe_pivot_fixture(root: Path) -> dict[str, Any]:
 
 
 def _probe_host() -> dict[str, Any]:
-    modules = {name: importlib.util.find_spec(name) is not None for name in ("pytest", "openpyxl", "xlsxwriter", "uno")}
-    commands = {name: shutil.which(name) is not None for name in ("node", "npm", "bun", "libreoffice")}
+    modules = {
+        name: importlib.util.find_spec(name) is not None
+        for name in ("pytest", "openpyxl", "xlsxwriter", "uno", "cerebras.cloud.sdk")
+    }
+    commands = {name: _command_path(name) is not None for name in ("node", "npm", "bun", "daytona", "libreoffice")}
     return _gate(
         "host_baseline",
         False,
