@@ -1,0 +1,3 @@
+# Separate workbook engine from agent orchestration
+
+The deterministic workbook engine will be implemented in Python behind a narrow CLI/JSON contract, while TypeScript owns the TrueForge agent and mailbox MCP orchestration. This polyglot boundary accepts extra runtime setup in exchange for keeping leak detection, repair, and verification in the strongest available OOXML toolchain without coupling those safety-critical results to model behavior. The repository remains a simple single project: a root TypeScript package, `engine/` for Python, `schemas/` for shared contracts, `fixtures/`, and `tests/e2e/`, without a monorepo framework.

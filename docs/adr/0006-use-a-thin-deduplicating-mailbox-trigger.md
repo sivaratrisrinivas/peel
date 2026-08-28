@@ -1,0 +1,3 @@
+# Use a thin deduplicating mailbox trigger
+
+A small external watcher will observe the dedicated sender mailbox and start a TrueForge turn for each new draft attachment. It will identify work by mailbox account, folder `UIDVALIDITY`, message UID, and attachment SHA-256, and only pass the attachment identity into TrueForge; all inspection, Repair, Verification, approvals, and Disclosure remain visible in TrueForge. It polls serially every five seconds, permits one active Run, maps an unchanged identity to the existing Run, and treats a changed attachment hash as a new Run. A manual trigger is the demo contingency because TrueForge does not provide a native mailbox watcher or webhook trigger.

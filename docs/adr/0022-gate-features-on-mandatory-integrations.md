@@ -1,0 +1,3 @@
+# Gate features on mandatory integrations
+
+Feature implementation starts only after one environment gate proves: a public repository with Qodo review, a Cerebras-backed TrueForge serial tool loop, denied `send_email` approval with zero side effects, Daytona command and artifact transport, owned-mailbox attachment retrieval and SMTP delivery, and the timeboxed LibreOffice pivot-fixture result. If schedule pressure remains, optional scenes, dynamic subagents, a separate frontend, failed A2, then A3 are cut in that order. Real TrueForge execution, Daytona, native Disclosure Approval, denial with zero SMTP, Verification, and owned-mailbox delivery are not cut.

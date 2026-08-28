@@ -1,0 +1,3 @@
+# Use a versioned engine manifest
+
+The Python workbook engine and TypeScript orchestration layer will communicate through a versioned JSON manifest for explicit `scan`, `repair`, and `verify` operations. The manifest may contain finding types, locations, counts, hashes, repair eligibility, artifact paths, and bounded Reveal Samples, but never whole recovered datasets. A Reveal Sample contains at most five recovered rows per Finding and exists only for the sender's ephemeral TrueForge view; it is not logged or retained. Model comparison of Claimed Scope against the manifest is restricted to `aligned`, `mismatch`, or `insufficient_context`; the latter two block automatic Repair and Disclosure, and the model never selects rows to remove.
