@@ -34,6 +34,12 @@ export interface TriggerIdentity {
   folder_uidvalidity: string;
   message_uid: string;
   attachment_sha256: string;
+  /**
+   * The watcher supplies this for a complete mailbox identity. Manual stage
+   * commands may omit it; the daemon derives the same revision hash from the
+   * envelope so the manual fallback remains compatible.
+   */
+  envelope_revision_hash?: string;
 }
 
 export interface Envelope {

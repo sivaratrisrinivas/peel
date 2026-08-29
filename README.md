@@ -48,6 +48,43 @@ Python engine in live mode. The runner supplies valid command identities and
 uses bounded Cerebras rate-limit backoff only before a tool action starts; a
 completed tool response is never replayed.
 
+## Optional Gmail Mailbox Trigger
+
+Issue #7 adds an optional serial Gmail/IMAP watcher. It is disabled by default
+so the manual staging route remains the demo fallback. When enabled, the
+watcher polls the configured Drafts mailbox every five seconds, accepts only
+one `.xlsx` attachment no larger than 10 MiB, one allowlisted recipient, a
+non-empty subject, and exactly one non-empty `Intended disclosure:` field. It
+uploads an eligible attachment to the local daemon and signals only the
+opaque Artifact Reference, envelope revision identity, and bounded Run
+metadata. It never scans, Repairs, authorizes, or discloses an artifact.
+
+The watcher is serial and SQLite-backed: an unchanged draft is deduplicated,
+an autosave edit creates a new envelope revision and invalidates prior
+judgment and authorization, an IMAP `UIDVALIDITY` change creates a distinct
+trigger identity, and an unrelated draft waits while one Run is active.
+Malformed or half-authored drafts are ignored without starting a Run. The
+watcher result and daemon log contain no draft body or attachment bytes.
+
+After exporting the recipient and IMAP settings in the supported WSL2 shell,
+run the live one-Run smoke check:
+
+```bash
+TMPDIR=/tmp TMP=/tmp TEMP=/tmp npm run build
+PEEL_OWNED_RECIPIENT=you@example.com npm run mailbox-smoke
+```
+
+The smoke command exits `0` only when one eligible draft starts one Run and a
+second poll is deduplicated to that same Run. It exits `2` with bounded
+metadata when mail configuration, retrieval, or eligibility proof is missing.
+For continuous optional polling alongside the local daemon, set
+`PEEL_MAILBOX_WATCH=1` before `npm start`; `PEEL_MAILBOX_POLL_INTERVAL_MS`
+may override the five-second interval.
+
+The manual fallback remains available through `POST /v1/artifacts` followed by
+`POST /v1/commands` with a `stage` command. Its existing public-boundary tests
+continue to cover direct staging without the watcher.
+
 Issue #5 adds the first read-only concealed-data journey. The deterministic
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
 metadata, applies a one-way Scope Assessment, and ends the Run in visible

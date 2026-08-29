@@ -87,6 +87,7 @@ const triggerSchema = {
     folder_uidvalidity: { type: "string", minLength: 1 },
     message_uid: { type: "string", minLength: 1 },
     attachment_sha256: hashSchema,
+    envelope_revision_hash: hashSchema,
   },
 };
 const envelopeSchema = {
