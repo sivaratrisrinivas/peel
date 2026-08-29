@@ -11,6 +11,7 @@ import sys
 import zipfile
 from email.message import EmailMessage
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from scripts import daytona_engine
@@ -76,6 +77,29 @@ def test_production_engine_verifies_clean_artifact_without_optional_reader(tmp_p
     assert verified["artifact_unchanged"] is True
     assert verified["changed_members"] == []
     assert verified["reopened_with"] == ["python-zipfile", "xml.etree.ElementTree"]
+
+
+def test_production_engine_refuses_when_optional_reader_cannot_reopen(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "clean.xlsx"
+    payload = _workbook(source)
+    digest = hashlib.sha256(payload).hexdigest()
+    import_module = daytona_engine.importlib.import_module
+
+    def broken_load_workbook(**_kwargs):
+        raise ValueError("invalid workbook")
+
+    def import_with_broken_openpyxl(name: str):
+        if name == "openpyxl":
+            return SimpleNamespace(load_workbook=broken_load_workbook)
+        return import_module(name)
+
+    monkeypatch.setattr(daytona_engine.importlib, "import_module", import_with_broken_openpyxl)
+
+    verified = daytona_engine._verify_package(source, digest, digest)
+
+    assert verified["status"] == "refused"
+    assert verified["refusal_code"] == "integrity_failure"
+    assert verified["reopened_with"] == []
 
 
 def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_path: Path) -> None:

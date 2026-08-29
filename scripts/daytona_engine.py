@@ -626,13 +626,16 @@ def _reopen_readers(path: Path) -> list[str]:
     readers = ["python-zipfile", "xml.etree.ElementTree"]
     try:
         openpyxl: Any = importlib.import_module("openpyxl")
+    except ImportError:
+        # The package readers above are the required reopen proof when the
+        # optional cross-check is not installed in a Daytona snapshot.
+        return readers
+    try:
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=False)
         workbook.close()
         readers.append("openpyxl")
     except Exception:
-        # The package readers above are the required reopen proof. Keep the
-        # optional openpyxl cross-check from blocking a valid Daytona snapshot.
-        pass
+        return []
     return readers
 
 
