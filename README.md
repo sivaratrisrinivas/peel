@@ -181,7 +181,13 @@ The repository's substantive slices received Qodo review before their merges:
 | Environment gate | [#11](https://github.com/sivaratrisrinivas/peel/pull/11) | [clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/11#issuecomment-5447407850) |
 | Gmail Mailbox Trigger | [#12](https://github.com/sivaratrisrinivas/peel/pull/12) | [clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770) |
 | Hidden worksheet Repair | [#13](https://github.com/sivaratrisrinivas/peel/pull/13) | [initial review](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5459968817), [follow-up](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460285686) |
-| Submission qualification | this PR | Qodo review and follow-up are release gates for this branch |
+| Submission qualification | [#15](https://github.com/sivaratrisrinivas/peel/pull/15) | [initial review](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460580573), [final clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460678826) |
+
+For PR #15, the initial Qodo review and successive follow-ups found and
+resolved recipient-evidence, serialized-privacy, SQLite casing, encoded-field,
+and numeric-value issues. The final follow-up against commit `ed80d2e` reports
+zero Bugs, rule violations, and skill insights; no finding was dismissed or
+deferred.
 
 The current architecture and environment decision is
 [ADR-0026](docs/adr/0026-current-architecture-and-environment-gate.md). The
