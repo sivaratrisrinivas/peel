@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import io
 import zipfile
@@ -13,7 +14,7 @@ def _package(
     *,
     output: Path,
     workbook: str | None = None,
-    extras: dict[str, str | bytes] | None = None,
+    extras: Mapping[str, str | bytes] | None = None,
 ) -> Path:
     workbook_xml = workbook or (
         '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -97,7 +98,7 @@ def test_issue8_engine_detects_and_repairs_hidden_row_and_column_values(tmp_path
 
 
 def test_issue8_engine_refuses_every_declared_dependency(tmp_path: Path) -> None:
-    cases = {
+    cases: dict[str, tuple[str, str | None, Mapping[str, str | bytes], str]] = {
         "formula": (
             '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>1</v></c></row>'
             '<row r="4"><c r="A4"><f>A2</f></c></row></sheetData></worksheet>',
