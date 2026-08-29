@@ -106,13 +106,17 @@ export function parseArtifactReference(value: unknown, path = "artifact"): Artif
 
 function parseTrigger(value: unknown): TriggerIdentity {
   const input = record(value, "trigger");
-  exactKeys(input, ["mailbox_account", "folder_uidvalidity", "message_uid", "attachment_sha256"], "trigger");
-  return {
+  exactKeys(input, ["mailbox_account", "folder_uidvalidity", "message_uid", "attachment_sha256", "envelope_revision_hash"], "trigger");
+  const trigger: TriggerIdentity = {
     mailbox_account: stringValue(input.mailbox_account, "trigger.mailbox_account"),
     folder_uidvalidity: stringValue(input.folder_uidvalidity, "trigger.folder_uidvalidity"),
     message_uid: stringValue(input.message_uid, "trigger.message_uid"),
     attachment_sha256: hashValue(input.attachment_sha256, "trigger.attachment_sha256"),
   };
+  if (input.envelope_revision_hash !== undefined) {
+    trigger.envelope_revision_hash = hashValue(input.envelope_revision_hash, "trigger.envelope_revision_hash");
+  }
+  return trigger;
 }
 
 function parseEnvelope(value: unknown): Envelope {

@@ -1,6 +1,7 @@
 import {
   API_VERSION,
   ENGINE_VERSION,
+  REPAIR_APPROVAL_TTL_MS,
   REVEAL_TTL_MS,
   type ApiResponse,
   type ArtifactReference,
@@ -21,6 +22,7 @@ import {
   type RepairApprovalView,
   type RepairPlan,
   type SuccessResponse,
+  type TriggerIdentity,
 } from "./contracts.js";
 import {
   ArtifactError,
@@ -173,6 +175,38 @@ export class PeelDaemon {
     return run ? publicRun(run, this.revealReferencesForRun(run)) : undefined;
   }
 
+  /** Return the Run for a stable mailbox message/artifact identity, if one exists. */
+  getRunForTrigger(trigger: TriggerIdentity): RunView | undefined {
+    const run = this.store.findRunByKey(runKey(trigger));
+    return run ? publicRun(run, this.revealReferencesForRun(run)) : undefined;
+  }
+
+  /** Return all non-terminal Runs so the watcher can enforce one active Run. */
+  getActiveRuns(): RunView[] {
+    return this.store.getActiveRuns().map((run) => publicRun(run, this.revealReferencesForRun(run)));
+  }
+
+  /** Check whether restart-sensitive in-memory artifact and envelope materialization is present. */
+  hasRunMaterialization(run: RunView): boolean {
+    const stored = this.store.getRun(run.run_id);
+    const heldEnvelope = this.envelopes.get(run.run_id);
+    if (
+      !stored ||
+      stored.revision !== run.revision ||
+      stored.artifact.sha256 !== run.artifact.sha256 ||
+      !heldEnvelope ||
+      heldEnvelope.revision !== run.revision
+    ) {
+      return false;
+    }
+    try {
+      this.artifactStore.read(stored.artifact);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   uploadArtifact(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference {
     return this.artifactStore.put(bytes, filename, ttlMs);
   }
@@ -225,6 +259,10 @@ export class PeelDaemon {
     parseClaimedScope(envelope.body);
     if (!this.allowedRecipients.has(envelope.recipient.toLowerCase())) throw new CommandFailure("recipient_not_allowed");
     if (envelope.attachment.byte_size > 10 * 1024 * 1024) throw new CommandFailure("artifact_too_large");
+    const revisionHash = envelopeRevisionHash(envelope);
+    if (trigger.envelope_revision_hash !== undefined && trigger.envelope_revision_hash !== revisionHash) {
+      throw new CommandFailure("trigger_identity_mismatch");
+    }
     try {
       this.artifactStore.read(envelope.attachment);
     } catch (error) {
@@ -232,19 +270,25 @@ export class PeelDaemon {
     }
 
     const key = runKey(trigger);
-    const revisionHash = envelopeRevisionHash(envelope);
     const current = this.store.findRunByKey(key);
     if (current) {
       if (current.state === "disclosed" && current.envelope_revision_hash !== revisionHash) {
         throw new CommandFailure("run_already_disclosed");
       }
       if (current.envelope_revision_hash === revisionHash) {
+        if (current.original_artifact.sha256 !== envelope.attachment.sha256) {
+          throw new CommandFailure("stale_identity");
+        }
+        if (current.artifact.sha256 === envelope.attachment.sha256) {
+          this.store.restoreArtifact(current.run_id, current.revision, envelope.attachment, this.clock.now());
+        }
+        const materializedArtifact = this.mustGetRun(current.run_id).artifact;
         this.envelopes.set(current.run_id, {
           runId: current.run_id,
           revision: current.revision,
-          envelope: { ...envelope, attachment: current.artifact },
+          envelope: { ...envelope, attachment: materializedArtifact },
         });
-        return success(current, { deduplicated: true });
+        return success(this.mustGetRun(current.run_id), { deduplicated: true });
       }
       const revised: Omit<StoredRun, "scan" | "verification" | "delivery"> = {
         ...current,
@@ -258,7 +302,9 @@ export class PeelDaemon {
         artifact: envelope.attachment,
         original_artifact: envelope.attachment,
       };
-      this.store.reviseRun(current.run_id, revised, this.clock.now());
+      if (!this.store.reviseRun(current.run_id, revised, this.clock.now())) {
+        throw new CommandFailure("active_run_exists");
+      }
       this.clearReveals(current.run_id);
       this.envelopes.set(current.run_id, { runId: current.run_id, revision: revised.revision, envelope });
       return success(this.mustGetRun(current.run_id));
@@ -277,7 +323,9 @@ export class PeelDaemon {
       artifact: envelope.attachment,
       original_artifact: envelope.attachment,
     };
-    this.store.createRun(run, this.clock.now());
+    if (!this.store.createRun(run, this.clock.now())) {
+      throw new CommandFailure("active_run_exists");
+    }
     this.envelopes.set(run.run_id, { runId: run.run_id, revision: run.revision, envelope });
     return success(this.mustGetRun(run.run_id));
   }
@@ -357,7 +405,7 @@ export class PeelDaemon {
     const approvalId = newId();
     const idempotencyKey = newId();
     const binding = repairApprovalBinding(run.run_id, run.revision, run.artifact.sha256, plan);
-    const expiresAt = this.clock.now() + 5 * 60 * 1000;
+    const expiresAt = this.clock.now() + REPAIR_APPROVAL_TTL_MS;
     this.store.createAuthorization(
       approvalId,
       run.run_id,
@@ -423,7 +471,7 @@ export class PeelDaemon {
     const plan = run.repair_plan;
     if (!plan || plan.status !== "eligible") throw new CommandFailure("repair_plan_unavailable");
     const authorization = this.store.getAuthorization(command.approval_id);
-    if (!authorization) throw new CommandFailure("authorization_not_found");
+    if (!authorization) throw new CommandFailure("repair_authorization_not_found");
     if (
       authorization.kind !== "repair" ||
       authorization.run_id !== run.run_id ||
@@ -431,15 +479,15 @@ export class PeelDaemon {
       authorization.idempotency_key !== command.idempotency_key ||
       canonicalJson(JSON.parse(authorization.binding_json)) !== canonicalJson(command.binding)
     ) {
-      throw new CommandFailure("authorization_binding_mismatch");
+      throw new CommandFailure("repair_authorization_binding_mismatch");
     }
     const expectedBinding = repairApprovalBinding(run.run_id, run.revision, run.original_artifact.sha256, plan);
     if (canonicalJson(expectedBinding) !== canonicalJson(command.binding)) throw new CommandFailure("stale_identity");
-    if (authorization.status !== "pending") throw new CommandFailure("authorization_not_pending");
+    if (authorization.status !== "pending") throw new CommandFailure("repair_authorization_not_pending");
     if (this.clock.now() >= authorization.expires_at) {
       this.store.setAuthorizationStatus(authorization.approval_id, "expired");
       this.store.setState(run.run_id, "refused", this.clock.now());
-      return this.error("authorization_expired", this.mustGetRun(run.run_id));
+      return this.error("repair_authorization_expired", this.mustGetRun(run.run_id));
     }
     this.store.setAuthorizationStatus(authorization.approval_id, "consumed");
     this.store.setState(run.run_id, "repairing", this.clock.now());
@@ -784,11 +832,17 @@ function publicErrorMessage(code: string): string {
     run_already_disclosed: "A disclosed Run cannot be revised.",
     run_not_found: "The Run does not exist.",
     stale_identity: "The command is bound to a stale or different Run identity.",
+    trigger_identity_mismatch: "The Mailbox Trigger identity does not match the exact draft envelope.",
+    active_run_exists: "Another Run is active; the Mailbox Trigger will be retried later.",
     stale_state: "The Run is not in the expected state for this command.",
     authorization_not_found: "The Disclosure Approval does not exist.",
     authorization_binding_mismatch: "The Disclosure Approval is not bound to this exact envelope and artifact.",
     authorization_not_pending: "The Disclosure Approval is no longer pending.",
     authorization_expired: "The Disclosure Approval expired before the decision.",
+    repair_authorization_not_found: "The Repair Approval does not exist.",
+    repair_authorization_binding_mismatch: "The Repair Approval is not bound to this exact Run, artifact, and Repair Plan.",
+    repair_authorization_not_pending: "The Repair Approval is no longer pending.",
+    repair_authorization_expired: "The Repair Approval expired before Repair began.",
     duplicate_disclosure: "This Disclosure Fingerprint was already accepted.",
     disclosure_rejected: "The Disclosure was rejected before acceptance.",
     delivery_unknown: "SMTP acceptance is ambiguous; no automatic retry was performed.",

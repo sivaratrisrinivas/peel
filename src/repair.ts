@@ -65,7 +65,7 @@ function relationshipSource(path: string): string {
 function relationshipTarget(path: string, target: string): string {
   const source = relationshipSource(path);
   const directory = source.includes("/") ? source.slice(0, source.lastIndexOf("/")) : "";
-  return normalizePath(`${directory}/${target}`);
+  return normalizePath(target.startsWith("/") ? target : `${directory}/${target}`);
 }
 
 function relationshipEntries(files: Record<string, Uint8Array>): Array<{ source: string; target: string; type: string; member: string }> {
@@ -148,7 +148,9 @@ function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
   if (sheet.name.length === 0) return false;
   const name = sheet.name.replace(/'/g, "''");
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:'${escaped}'|${escaped})!`, "i").test(xml) || xml.includes(sheet.path);
+  return new RegExp(`(?:'${escaped}'|${escaped})!`, "i").test(xml) ||
+    new RegExp(`(?:^|\\s)sheet=["']'?${escaped}'?["']`, "i").test(xml) ||
+    (sheet.path.length > 0 && xml.includes(sheet.path));
 }
 
 function matchingElements(xml: string, element: string, sheet: SheetInfo): boolean {
@@ -204,8 +206,9 @@ function actionFor(sheet: SheetInfo, files: Record<string, Uint8Array>): RepairA
     target_member: target,
     changed_members: changed,
     capability_losses: [
-      `The hidden worksheet ${sheet.name} and its cell values will be removed.`,
-      "Workbook behavior that depends on this worksheet was checked and is not included in the supported Repair Plan.",
+      `The hidden worksheet ${sheet.name}, its cells, hidden state, row and column metadata, and sheet-local formatting will be removed.`,
+      "No visible formulas, defined names, data validation, tables, charts, pivots, package relationships, macros, or external connections reference this worksheet; none of those capabilities are changed by this plan.",
+      "The structural Repair does not recalculate workbook formulas or cached values after the worksheet is removed.",
     ],
   };
 }

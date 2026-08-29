@@ -215,7 +215,7 @@ describe("Issue #6 hidden worksheet Repair journey", () => {
         ),
         "xl/tables/table1.xml": text.encode(`<table ref="Hidden!A1"/>`),
         "xl/charts/chart1.xml": text.encode(`<chart><f>Hidden!$A$1</f></chart>`),
-        "xl/pivotTables/pivotTable1.xml": text.encode(`<pivotTableDefinition><location ref="Hidden!A1"/></pivotTableDefinition>`),
+        "xl/pivotTables/pivotTable1.xml": text.encode(`<pivotTableDefinition><location ref="A1"/><worksheetSource sheet="Hidden" ref="A1"/></pivotTableDefinition>`),
         "xl/worksheets/_rels/sheet1.xml.rels": text.encode(`<Relationships><Relationship Id="rIdHidden" Target="sheet2.xml"/></Relationships>`),
         "xl/vbaProject.bin": new Uint8Array([1, 2, 3]),
         "xl/connections.xml": text.encode("<connections/>")
@@ -261,13 +261,13 @@ describe("Issue #6 hidden worksheet Repair journey", () => {
       binding: tamperedBinding,
     });
     expect(tampered.ok).toBe(false);
-    if (!tampered.ok) expect(tampered.error.code).toBe("authorization_binding_mismatch");
+    if (!tampered.ok) expect(tampered.error.code).toBe("repair_authorization_binding_mismatch");
     expect(first.artifacts.read(first.artifact)).toEqual(original);
 
-    first.clock.advance(5 * 60 * 1000);
+    first.clock.advance(10 * 60 * 1000);
     const expired = await first.daemon.execute(applyCommand(scanned.run, scanned.repair_approval));
     expect(expired.ok).toBe(false);
-    if (!expired.ok) expect(expired.error.code).toBe("authorization_expired");
+    if (!expired.ok) expect(expired.error.code).toBe("repair_authorization_expired");
     expect(first.artifacts.read(first.artifact)).toEqual(original);
 
     const replayCase = setup();

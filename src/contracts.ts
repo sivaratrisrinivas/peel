@@ -2,6 +2,7 @@ export const API_VERSION = "1" as const;
 export const ENGINE_VERSION = "1.0.0" as const;
 export const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
 export const REVEAL_TTL_MS = 60 * 1000;
+export const REPAIR_APPROVAL_TTL_MS = 10 * 60 * 1000;
 
 export type RunState =
   | "staged"
@@ -37,6 +38,12 @@ export interface TriggerIdentity {
   folder_uidvalidity: string;
   message_uid: string;
   attachment_sha256: string;
+  /**
+   * The watcher supplies this for a complete mailbox identity. Manual stage
+   * commands may omit it; the daemon derives the same revision hash from the
+   * envelope so the manual fallback remains compatible.
+   */
+  envelope_revision_hash?: string;
 }
 
 export interface Envelope {

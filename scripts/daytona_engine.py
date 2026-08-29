@@ -129,7 +129,7 @@ def _relationship_source(path: str) -> str:
 def _relationship_target(path: str, target: str) -> str:
     source = _relationship_source(path)
     directory = source.rsplit("/", 1)[0] if "/" in source else ""
-    return _normalize_path(f"{directory}/{target}")
+    return _normalize_path(target if target.startswith("/") else f"{directory}/{target}")
 
 
 def _relationship_entries(files: dict[str, bytes]) -> list[dict[str, str]]:
@@ -184,7 +184,11 @@ def _contains_sheet_reference(xml: str, sheet: dict[str, str]) -> bool:
     if not name:
         return False
     escaped = re.escape(name)
-    return bool(re.search(rf"(?:'{escaped}'|{escaped})!", xml, re.IGNORECASE)) or sheet["path"] in xml
+    return (
+        bool(re.search(rf"(?:'{escaped}'|{escaped})!", xml, re.IGNORECASE))
+        or bool(re.search(rf"(?:^|\s)sheet=[\"']?'{escaped}'?[\"']", xml, re.IGNORECASE))
+        or (bool(sheet["path"]) and sheet["path"] in xml)
+    )
 
 
 def _matching_element(xml: str, element: str, sheet: dict[str, str]) -> bool:
@@ -608,7 +612,7 @@ def _reopen_readers(path: Path) -> list[str]:
         workbook.close()
         readers.append("openpyxl")
     except Exception:
-        pass
+        return []
     return readers
 
 

@@ -48,6 +48,47 @@ Python engine in live mode. The runner supplies valid command identities and
 uses bounded Cerebras rate-limit backoff only before a tool action starts; a
 completed tool response is never replayed.
 
+## Optional Gmail Mailbox Trigger
+
+Issue #7 adds an optional serial Gmail/IMAP watcher. It is disabled by default
+so the manual staging route remains the demo fallback. When enabled, the
+watcher polls the configured Drafts mailbox every five seconds, accepts only
+one `.xlsx` attachment no larger than 10 MiB, one allowlisted recipient, a
+non-empty subject, and exactly one non-empty `Intended disclosure:` field. It
+uploads an eligible attachment to the local daemon and signals only the
+opaque Artifact Reference, envelope revision identity, and bounded Run
+metadata. It never scans, Repairs, authorizes, or discloses an artifact.
+
+The watcher is serial and SQLite-backed: an unchanged draft is deduplicated,
+an autosave edit creates a new envelope revision and invalidates prior
+judgment and authorization, an IMAP `UIDVALIDITY` change creates a distinct
+trigger identity, and an unrelated draft waits while one Run is active. The
+bridge scans a default batch of 25 UIDs per poll, uses a cursor scoped to the
+IMAP host, account, folder, and UIDVALIDITY to wrap through older drafts, and
+fetches full messages only after lightweight header checks; the batch can be
+tuned up to 100 with `IMAP_DRAFT_SCAN_BATCH`.
+Malformed or half-authored drafts are ignored without starting a Run. The
+watcher result and daemon log contain no draft body or attachment bytes.
+
+After exporting the recipient and IMAP settings in the supported WSL2 shell,
+run the live one-Run smoke check:
+
+```bash
+TMPDIR=/tmp TMP=/tmp TEMP=/tmp npm run build
+PEEL_OWNED_RECIPIENT=you@example.com npm run mailbox-smoke
+```
+
+The smoke command exits `0` only when one eligible draft starts one Run and a
+second poll is deduplicated to that same Run. It exits `2` with bounded
+metadata when mail configuration, retrieval, or eligibility proof is missing.
+For continuous optional polling alongside the local daemon, set
+`PEEL_MAILBOX_WATCH=1` before `npm start`; `PEEL_MAILBOX_POLL_INTERVAL_MS`
+may override the five-second interval.
+
+The manual fallback remains available through `POST /v1/artifacts` followed by
+`POST /v1/commands` with a `stage` command. Its existing public-boundary tests
+continue to cover direct staging without the watcher.
+
 Issue #5 adds the concealed-data Attack and one-way Scope Assessment. The
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
 metadata. `mismatch`, `insufficient_context`, and model failure fail closed;
@@ -98,6 +139,19 @@ Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
 suspicious hidden worksheets, missing context, scope mismatch, model failure,
 private Reveal expiry, and the handoff into Repair Approval. The default path
 keeps Reveal off, and a refused Run has no Repair or Disclosure path.
+
+Issue #7 adds an optional Gmail/IMAP Mailbox Trigger. The WSL fake-IMAP and
+public-boundary tests pass. The live owned-mailbox smoke also passed on
+2026-08-29 against the configured mailbox: the first poll started one Run and
+the second poll deduplicated that same Run. The smoke output contains only
+bounded metadata.
+
+Qodo's initial review is recorded on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459264401)
+for commit `0faa8bc`. Its follow-up review on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770)
+found and verified fixes for restart state, bridge and socket timeouts,
+shutdown ordering, UID scanning and cursor scope, repeated draft observation,
+and fetch retries. The final update through `d490716` reports zero bugs, rule
+violations, or skill insights. No findings were dismissed or deferred.
 
 Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
 TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with

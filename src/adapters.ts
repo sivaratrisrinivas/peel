@@ -449,7 +449,10 @@ function rowsFromWorksheet(
 }
 
 export class FakeWorkbookEngine implements EngineAdapter {
-  constructor(private readonly artifacts: ArtifactStore) {}
+  constructor(
+    private readonly artifacts: ArtifactStore,
+    private readonly options: { repairEnabled?: boolean } = {},
+  ) {}
 
   scan(reference: ArtifactReference): EngineScanResult {
     try {
@@ -469,6 +472,19 @@ export class FakeWorkbookEngine implements EngineAdapter {
   }
 
   repair(reference: ArtifactReference, plan: RepairPlan): EngineRepairResult {
+    if (this.options.repairEnabled === false) {
+      return {
+        version: "1",
+        operation: "repair",
+        status: "refused",
+        artifact_sha256: reference.sha256,
+        original_artifact_sha256: reference.sha256,
+        engine_version: ENGINE_VERSION,
+        repair_plan_sha256: repairPlanHash(plan),
+        changed_members: [],
+        refusal_code: "unsupported_content",
+      };
+    }
     const originalBytes = this.artifacts.read(reference);
     try {
       const repaired = repairWorkbook(originalBytes, plan, reference.sha256);
