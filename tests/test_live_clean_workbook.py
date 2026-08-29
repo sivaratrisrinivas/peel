@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import imaplib
 import json
 import os
-import openpyxl
 import pytest
 import subprocess
 import sys
 import zipfile
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Any
 
 from scripts import daytona_engine
 from scripts import mail_gate_probe
 
 
 ROOT = Path(__file__).resolve().parents[1]
+openpyxl: Any = importlib.import_module("openpyxl")
 
 
 def _workbook(path: Path, workbook_xml: str = '<workbook><sheets><sheet name="Visible" sheetId="1"/></sheets></workbook>') -> bytes:
