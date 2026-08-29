@@ -171,6 +171,21 @@ references, malformed XML, runtime validation, duplicate attributes, grid
 bounds, defined-name scope, and mixed repair scope. The fixes are covered by
 tests. No findings were dismissed or deferred.
 
+## Issue #9: pivot-cache disclosure is out of scope
+
+Peel does not support pivot-cache disclosure. The environment gate found no raw
+`.xlsx` fixture containing `pivotCacheDefinition`, `pivotCacheRecords`, and
+populated `sharedItems`. Without that fixture, the project cannot test or claim
+the pivot-cache Attack, Finding, Repair, or Verification behavior in issue #9.
+
+The `pivot_cache` schema value stays reserved for future work. It does not mean
+that Peel supports pivot-cache files. Reopen issue #9 only after the gate finds
+the required workbook and public-boundary fixtures prove the full workflow.
+
+Qodo reviewed [PR #14](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460451535)
+and found zero bugs, rule violations, or requirement gaps. Its [final pass](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460483810)
+also found none. No findings were dismissed or deferred.
+
 ## Current status
 
 Issue #5 is complete. Its public-boundary tests cover legitimate-looking and

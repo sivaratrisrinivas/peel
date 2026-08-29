@@ -62,6 +62,11 @@ def test_offline_gate_reports_mandatory_no_go_and_optional_cuts() -> None:
     }
     assert {"reveal", "libreoffice", "pivot_fixture"} <= optional_cuts
 
+    pivot_gate = next(gate for gate in report["gates"] if gate["name"] == "pivot_fixture")
+    assert pivot_gate["status"] == "cut"
+    assert pivot_gate["evidence"]["trusted_fixture_found"] is False
+    assert "pivot coverage is an explicit scope cut" in pivot_gate["summary"]
+
 
 def test_report_never_echoes_secret_values() -> None:
     secret = "do-not-record-this-cerebras-key"
