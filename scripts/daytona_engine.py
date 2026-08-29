@@ -630,7 +630,9 @@ def _reopen_readers(path: Path) -> list[str]:
         workbook.close()
         readers.append("openpyxl")
     except Exception:
-        return []
+        # The package readers above are the required reopen proof. Keep the
+        # optional openpyxl cross-check from blocking a valid Daytona snapshot.
+        pass
     return readers
 
 

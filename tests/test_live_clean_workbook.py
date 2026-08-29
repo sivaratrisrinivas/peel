@@ -56,6 +56,28 @@ def test_production_engine_contract_reports_clean_and_verified_without_rewriting
     assert Path(daytona_engine.OUTPUT_PATH).read_bytes() == payload
 
 
+def test_production_engine_verifies_clean_artifact_without_optional_reader(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "clean.xlsx"
+    payload = _workbook(source)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    import_module = daytona_engine.importlib.import_module
+
+    def import_without_openpyxl(name: str):
+        if name == "openpyxl":
+            raise ImportError("optional reader unavailable")
+        return import_module(name)
+
+    monkeypatch.setattr(daytona_engine.importlib, "import_module", import_without_openpyxl)
+
+    verified = daytona_engine._verify_package(source, digest, digest)
+
+    assert verified["status"] == "verified"
+    assert verified["artifact_unchanged"] is True
+    assert verified["changed_members"] == []
+    assert verified["reopened_with"] == ["python-zipfile", "xml.etree.ElementTree"]
+
+
 def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_path: Path) -> None:
     source = tmp_path / "hidden.xlsx"
     payload = _workbook(
