@@ -131,8 +131,9 @@ relationships and content types, checks the visible-content baseline, and
 reopens the candidate with the available readers. Any remaining Finding,
 unexplained member change, parse failure, or reopen failure destroys the
 candidate and ends the Run in Refusal. Hidden-row and hidden-column value
-handling is described in issue #8 below; pivot caches, macros, external
-connections, and unsupported OOXML extensions remain outside this supported
+handling is described in issue #8 below. Pivot-cache support is limited to a
+worksheet-sourced cache whose cached values are absent from visible worksheets;
+external caches and unsupported OOXML extensions remain outside this supported
 profile.
 
 The initial [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/13#pullrequestreview-5056601225)
@@ -171,16 +172,25 @@ references, malformed XML, runtime validation, duplicate attributes, grid
 bounds, defined-name scope, and mixed repair scope. The fixes are covered by
 tests. No findings were dismissed or deferred.
 
-## Issue #9: pivot-cache disclosure is out of scope
+## Issue #9: pivot-cache disclosure
 
-Peel does not support pivot-cache disclosure. The environment gate found no raw
-`.xlsx` fixture containing `pivotCacheDefinition`, `pivotCacheRecords`, and
-populated `sharedItems`. Without that fixture, the project cannot test or claim
-the pivot-cache Attack, Finding, Repair, or Verification behavior in issue #9.
+Peel detects recoverable worksheet-sourced pivot-cache values when the source
+worksheet is absent or hidden from the visible workbook. The Finding identifies
+the cache-records member and count without exposing values in Run metadata.
+When Reveal is enabled, at most five reconstructed rows are held locally for
+60 seconds. A fresh native Repair Approval is required before Peel clears the
+cache records and shared items.
 
-The `pivot_cache` schema value stays reserved for future work. It does not mean
-that Peel supports pivot-cache files. Reopen issue #9 only after the gate finds
-the required workbook and public-boundary fixtures prove the full workflow.
+Repair changes only the approved cache definition and records members. It
+preserves the pivot table and every unrelated ZIP member, then reruns the
+Attack, relationship/content-type checks, visible-content baseline, and package
+reopen checks. External cache sources and incomplete or malformed cache
+structures are refused.
+
+The public fixture provenance and derivation are recorded in
+[`docs/evidence/pivot-cache-fixture-2026-08-29.md`](docs/evidence/pivot-cache-fixture-2026-08-29.md).
+Qodo review evidence will be added here after the implementation pull request
+and its follow-up review complete.
 
 Qodo reviewed [PR #14](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460451535)
 and found zero bugs, rule violations, or requirement gaps. Its [final pass](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460483810)

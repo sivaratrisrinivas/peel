@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -582,38 +583,60 @@ def _probe_libreoffice() -> dict[str, Any]:
 
 
 def _probe_pivot_fixture(root: Path) -> dict[str, Any]:
-    fixture_root = root / "fixtures"
-    candidates = sorted(fixture_root.rglob("*.xlsx")) if fixture_root.exists() else []
+    fixture_roots = [root / "fixtures", root / "tests" / "fixtures"]
+    candidates = sorted({candidate for fixture_root in fixture_roots if fixture_root.exists() for candidate in fixture_root.rglob("*.xlsx")})
     evidence: dict[str, Any] = {
-        "fixture_directory_present": fixture_root.exists(),
+        "fixture_directory_present": any(fixture_root.exists() for fixture_root in fixture_roots),
         "candidate_count": len(candidates),
         "trusted_fixture_found": False,
         "required_parts_found": False,
+        "cache_only_value_found": False,
     }
     for candidate in candidates:
         try:
             with zipfile.ZipFile(candidate) as package:
-                members = {member.lower() for member in package.namelist()}
-                has_definition = any("pivotcachedefinition" in member for member in members)
-                has_records = any("pivotcacherecords" in member for member in members)
-                shared_items = any(
-                    b"<sharedItems" in package.read(member)
-                    for member in package.namelist()
-                    if member.lower().endswith(".xml")
-                )
-        except (OSError, ValueError, zipfile.BadZipFile):
+                members = set(package.namelist())
+                definitions = sorted(member for member in members if re.fullmatch(r"xl/pivotCache/pivotCacheDefinition[^/]*\.xml", member, re.IGNORECASE))
+                records = sorted(member for member in members if re.fullmatch(r"xl/pivotCache/pivotCacheRecords[^/]*\.xml", member, re.IGNORECASE))
+                has_definition = bool(definitions)
+                has_records = bool(records)
+                shared_items = False
+                cache_only = False
+                workbook_root = ElementTree.fromstring(package.read("xl/workbook.xml"))
+                visible_sheet_names = {
+                    element.attrib.get("name", "")
+                    for element in workbook_root.iter()
+                    if element.tag.rsplit("}", 1)[-1].lower() == "sheet"
+                    and element.attrib.get("state", "visible").lower() not in {"hidden", "veryhidden"}
+                }
+                for definition_name in definitions:
+                    definition_root = ElementTree.fromstring(package.read(definition_name))
+                    fields = [element for element in definition_root.iter() if element.tag.rsplit("}", 1)[-1].lower() == "shareditems"]
+                    populated = [element for element in fields if any(child.tag.rsplit("}", 1)[-1].lower() in {"s", "n", "d", "b", "e", "m"} for child in element)]
+                    shared_items = shared_items or bool(populated)
+                    source = next((element for element in definition_root.iter() if element.tag.rsplit("}", 1)[-1].lower() == "worksheetsource"), None)
+                    source_sheet = source.attrib.get("sheet", "") if source is not None else ""
+                    if source_sheet and source_sheet not in visible_sheet_names:
+                        cache_only = True
+                if records:
+                    cache_only = cache_only or any(
+                        any(element.tag.rsplit("}", 1)[-1].lower() == "r" for element in ElementTree.fromstring(package.read(records_name)))
+                        for records_name in records
+                    )
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, ElementTree.ParseError):
             continue
-        if has_definition and has_records and shared_items:
+        evidence["required_parts_found"] = evidence["required_parts_found"] or (has_definition and has_records and shared_items)
+        evidence["cache_only_value_found"] = evidence["cache_only_value_found"] or (has_definition and has_records and shared_items and cache_only)
+        if evidence["required_parts_found"] and evidence["cache_only_value_found"]:
             evidence["trusted_fixture_found"] = True
-            evidence["required_parts_found"] = True
             break
 
-    if evidence["required_parts_found"]:
+    if evidence["trusted_fixture_found"]:
         return _gate(
             "pivot_fixture",
             False,
             "pass",
-            "A pivot fixture contains the required cache definition, records, and shared items.",
+            "A public pivot fixture proves populated cache parts and a cache-only value absent from visible worksheets.",
             evidence,
         )
     return _gate(

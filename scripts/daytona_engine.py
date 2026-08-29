@@ -50,7 +50,9 @@ def _allowed_profile_part(name: str) -> bool:
         or (name.startswith("xl/drawings/") and name.endswith((".xml", ".rels")))
         or (name.startswith("xl/charts/") and name.endswith(".xml"))
         or (name.startswith("xl/pivotTables/") and name.endswith(".xml"))
+        or (name.startswith("xl/pivotTables/_rels/") and name.endswith(".rels"))
         or (name.startswith("xl/pivotCache/") and name.endswith(".xml"))
+        or (name.startswith("xl/pivotCache/_rels/") and name.endswith(".rels"))
         or (name.startswith("xl/externalLinks/") and name.endswith((".xml", ".rels")))
         or name in {"xl/connections.xml", "xl/vbaProject.bin"}
     )
@@ -183,6 +185,147 @@ def _workbook_sheets(files: dict[str, bytes]) -> list[dict[str, str]]:
             }
         )
     return sheets
+
+
+def _element_name(element: ElementTree.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1].lower()
+
+
+def _xml_value(element: ElementTree.Element) -> str:
+    value = element.attrib.get("v")
+    return _decode_xml(value if value is not None else "".join(element.itertext()))
+
+
+def _pivot_cache_infos(files: dict[str, bytes], sheets: list[dict[str, str]]) -> list[dict[str, Any]]:
+    relationships = _relationship_entries(files)
+    visible_values: set[str] = set()
+    shared_strings: list[str] = []
+    if "xl/sharedStrings.xml" in files:
+        try:
+            shared_root = ElementTree.fromstring(files["xl/sharedStrings.xml"])
+            shared_strings = [
+                "".join(text.text or "" for text in item.iter() if _element_name(text) == "t")
+                for item in shared_root
+                if _element_name(item) == "si"
+            ]
+        except (ElementTree.ParseError, UnicodeDecodeError):
+            shared_strings = []
+    for sheet in sheets:
+        if sheet["state"] in {"hidden", "veryhidden"} or sheet["path"] not in files:
+            continue
+        try:
+            root = ElementTree.fromstring(files[sheet["path"]])
+        except (ElementTree.ParseError, UnicodeDecodeError):
+            continue
+        for element in root.iter():
+            if _element_name(element) != "c":
+                continue
+            cell_type = element.attrib.get("t", "").lower()
+            for child in element:
+                if _element_name(child) in {"v", "t"}:
+                    value = _xml_value(child)
+                    if cell_type == "s" and value.isdigit() and int(value) < len(shared_strings):
+                        value = shared_strings[int(value)]
+                    visible_values.add(value)
+
+    caches: list[dict[str, Any]] = []
+    definition_names = sorted(
+        name for name in files
+        if re.fullmatch(r"xl/pivotCache/pivotCacheDefinition[^/]*\.xml", name, re.IGNORECASE)
+    )
+    for definition_member in definition_names:
+        try:
+            definition = ElementTree.fromstring(files[definition_member])
+        except (ElementTree.ParseError, UnicodeDecodeError):
+            continue
+        cache_source = next((element for element in definition.iter() if _element_name(element) == "cachesource"), None)
+        source_type = cache_source.attrib.get("type", "").lower() if cache_source is not None else ""
+        worksheet_source = next((element for element in definition.iter() if _element_name(element) == "worksheetsource"), None)
+        source_name = _decode_xml(worksheet_source.attrib.get("sheet", "pivot-cache")) if worksheet_source is not None else "pivot-cache"
+        shared_items: list[list[str]] = []
+        for field in definition.iter():
+            if _element_name(field) != "cachefield":
+                continue
+            shared = next((element for element in field if _element_name(element) == "shareditems"), None)
+            shared_items.append(
+                [_xml_value(element) for element in list(shared or []) if _element_name(element) in {"s", "n", "d", "b", "e", "m"}]
+            )
+        records_relation = next(
+            (
+                relation for relation in relationships
+                if relation["source"] == definition_member
+                and "pivotcacherecords" in relation["type"].lower()
+            ),
+            None,
+        )
+        records_member = records_relation["target"] if records_relation else ""
+        rows: list[list[str]] = []
+        records_root_name = ""
+        if records_member in files:
+            try:
+                records_root = ElementTree.fromstring(files[records_member])
+                records_root_name = _element_name(records_root)
+                for record in [element for element in records_root if _element_name(element) == "r"]:
+                    values: list[str] = []
+                    valid = True
+                    for value in list(record):
+                        tag = _element_name(value)
+                        raw = _xml_value(value)
+                        if tag == "x":
+                            index = int(raw) if raw.isdigit() else -1
+                            field = shared_items[len(values)] if len(values) < len(shared_items) else []
+                            if index < 0 or index >= len(field):
+                                valid = False
+                                break
+                            values.append(field[index])
+                        elif tag in {"s", "n", "d", "b", "e", "m"}:
+                            values.append(raw)
+                    if valid:
+                        rows.append(values)
+            except (ElementTree.ParseError, UnicodeDecodeError):
+                rows = []
+        has_data = bool(rows) or any(shared_items)
+        if not has_data:
+            continue
+        refusal_reason: str | None = None
+        if source_type != "worksheet":
+            refusal_reason = f"Pivot cache {definition_member} uses unsupported cache source type {source_type or 'unknown'}."
+        elif worksheet_source is None:
+            refusal_reason = f"Pivot cache {definition_member} has no worksheet source reference."
+        elif not records_member or records_member not in files:
+            refusal_reason = f"Pivot cache {definition_member} has no supported pivotCacheRecords relationship."
+        elif records_root_name != "pivotcacherecords":
+            refusal_reason = f"Pivot cache {definition_member} does not point to a pivotCacheRecords part."
+        elif not shared_items or not rows:
+            refusal_reason = f"Pivot cache {definition_member} has incomplete cache fields or records."
+        source = next(
+            (sheet for sheet in sheets if sheet["name"].casefold() == source_name.casefold()),
+            None,
+        )
+        cache_only_count = (
+            max(len(rows), 1)
+            if refusal_reason
+            else sum(
+                1 for row in rows
+                if source is None
+                or source["state"] in {"hidden", "veryhidden"}
+                or any(value not in visible_values for value in row)
+            )
+        )
+        if cache_only_count == 0 and not refusal_reason:
+            continue
+        caches.append(
+            {
+                "definition_member": definition_member,
+                "records_member": records_member,
+                "source_sheet": source_name,
+                "supported": refusal_reason is None,
+                "refusal_reason": refusal_reason,
+                "rows": rows,
+                "cache_only_count": cache_only_count,
+            }
+        )
+    return caches
 
 
 def _contains_sheet_reference(xml: str, sheet: dict[str, str]) -> bool:
@@ -586,16 +729,36 @@ def _clear_action(sheet: dict[str, str], cells: list[str]) -> dict[str, Any]:
     }
 
 
+def _clear_pivot_cache_action(cache: dict[str, Any]) -> dict[str, Any]:
+    definition_member = cache["definition_member"]
+    records_member = cache["records_member"]
+    source_sheet = cache["source_sheet"]
+    return {
+        "kind": "clear_pivot_cache_values",
+        "worksheet": source_sheet,
+        "target_member": records_member,
+        "definition_member": definition_member,
+        "records_member": records_member,
+        "changed_members": sorted({definition_member, records_member}),
+        "capability_losses": [
+            f"Cached pivot values from {source_sheet} will be cleared from {definition_member} and {records_member}.",
+            "Pivot filtering, drill-through, refresh, and interactive behavior that depends on cached source values may be lost.",
+            "The original Artifact Reference remains unchanged and retains the recoverable cache values.",
+        ],
+    }
+
+
 def _build_repair_plan(
     files: dict[str, bytes],
     sheets: list[dict[str, str]],
     findings: list[dict[str, Any]],
     artifact_sha256: str,
     unresolved_by_worksheet: dict[str, int],
+    pivot_caches: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     hidden = [sheet for sheet in sheets if sheet["state"] in {"hidden", "veryhidden"}]
     concealed_by_worksheet = _concealed_cells_by_worksheet(files, sheets)
-    if not hidden and not concealed_by_worksheet and not unresolved_by_worksheet:
+    if not hidden and not concealed_by_worksheet and not unresolved_by_worksheet and not pivot_caches:
         return None
     dependencies = _empty_dependency_analysis()
     relationships = _relationship_entries(files)
@@ -612,8 +775,14 @@ def _build_repair_plan(
             name for name in files if name == "xl/connections.xml" or name.startswith("xl/externalLinks/")
         )
         reasons.append("External connections are present and cannot be proven safe by this Repair.")
-    if any(finding["mechanism"] not in {"hidden_worksheet", "hidden_row_or_column"} for finding in findings):
+    if any(finding["mechanism"] not in {"hidden_worksheet", "hidden_row_or_column", "pivot_cache"} for finding in findings):
         reasons.append("The complete plan contains a concealed mechanism that this Repair does not transform.")
+
+    for cache in pivot_caches:
+        if cache["supported"]:
+            actions.append(_clear_pivot_cache_action(cache))
+        else:
+            reasons.append(cache["refusal_reason"] or f"Pivot cache {cache['definition_member']} is not supported.")
     for sheet in sheets:
         if (
             not sheet["path"]
@@ -789,7 +958,7 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
         workbook = files["xl/workbook.xml"]
         profile_accepted = bool(
             workbook
-            and "xl/worksheets/sheet1.xml" in files
+            and any(name.startswith("xl/worksheets/") and name.endswith(".xml") for name in files)
             and "spreadsheetml.sheet.main+xml" in content_types
             and not unknown
         )
@@ -807,13 +976,19 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
     concealed_value_count = sum(len(cells) for cells in concealed.values()) + sum(unresolved.values())
     if concealed_value_count:
         findings.append({"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": concealed_value_count})
+    pivot_caches = _pivot_cache_infos(files, sheets)
+    for cache in pivot_caches:
+        if cache["cache_only_count"] > 0:
+            findings.append({"mechanism": "pivot_cache", "location": cache["records_member"], "count": cache["cache_only_count"]})
+    plan = _build_repair_plan(files, sheets, findings, artifact_sha256, unresolved, pivot_caches)
     return {
         "files": files,
         "sheets": sheets,
         "findings": findings,
         "profile_accepted": True,
         "unknown": unknown,
-        "plan": _build_repair_plan(files, sheets, findings, artifact_sha256, unresolved),
+        "pivot_caches": pivot_caches,
+        "plan": plan,
     }
 
 
@@ -949,6 +1124,57 @@ def _clear_cell_values(xml: str, cells: list[str]) -> str:
     return result
 
 
+def _set_xml_attribute(opening: str, name: str, value: str) -> str:
+    pattern = re.compile(rf"(\s{re.escape(name)}=[\"'])([^\"']*)([\"'])", re.IGNORECASE)
+    if pattern.search(opening):
+        return pattern.sub(rf"\g<1>{value}\g<3>", opening, count=1)
+    return re.sub(r"\s*/>$", f' {name}="{value}"/>', opening) if opening.rstrip().endswith("/>") else re.sub(r"\s*>$", f' {name}="{value}">', opening)
+
+
+def _remove_xml_attributes(opening: str, names: list[str]) -> str:
+    result = opening
+    for name in names:
+        result = re.sub(rf"\s{re.escape(name)}=[\"'][^\"']*[\"']", "", result, flags=re.IGNORECASE)
+    return result
+
+
+def _clear_pivot_cache_definition(xml: str) -> str:
+    value_tags = _local_element("s|n|d|b|e|m")
+    shared_attributes = ["count", "minValue", "maxValue", "minDate", "maxDate"]
+    shared_pattern = re.compile(
+        rf"(<{_local_element('sharedItems')}\b[^>]*?)(?:/>|>([\s\S]*?)</{_local_element('sharedItems')}>)",
+        re.IGNORECASE,
+    )
+
+    def clear_shared(match: re.Match[str]) -> str:
+        opening = _remove_xml_attributes(match.group(1), shared_attributes)
+        content = match.group(2)
+        if content is None:
+            return opening + "/>"
+        cleared = re.sub(rf"<{value_tags}\b[^>]*(?:/>|>[\s\S]*?</{value_tags}>)", "", content, flags=re.IGNORECASE)
+        return opening + ">" + cleared + "</sharedItems>"
+
+    result = shared_pattern.sub(clear_shared, xml)
+    return re.sub(
+        rf"(<{_local_element('pivotCacheDefinition')}\b[^>]*)>",
+        lambda match: _set_xml_attribute(match.group(1) + ">", "recordCount", "0"),
+        result,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+
+def _clear_pivot_cache_records(xml: str) -> str:
+    result = re.sub(rf"<{_local_element('r')}\b[\s\S]*?(?:/>|>[\s\S]*?</{_local_element('r')}>)", "", xml, flags=re.IGNORECASE)
+    return re.sub(
+        rf"(<{_local_element('pivotCacheRecords')}\b[^>]*)>",
+        lambda match: _set_xml_attribute(match.group(1) + ">", "count", "0"),
+        result,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+
 def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> dict[str, Any]:
     inspection = _inspect_package(path, artifact_sha256)
     if not inspection["profile_accepted"] or inspection.get("plan") != plan or plan.get("status") != "eligible":
@@ -968,6 +1194,14 @@ def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> d
         if action["kind"] == "clear_hidden_cell_values":
             target = action["target_member"]
             changes[target] = _clear_cell_values(files[target].decode("utf-8"), action["cell_references"]).encode("utf-8")
+            continue
+        if action["kind"] == "clear_pivot_cache_values":
+            definition = action["definition_member"]
+            records = action["records_member"]
+            if definition not in files or records not in files:
+                raise ValueError("pivot cache repair target is missing")
+            changes[definition] = _clear_pivot_cache_definition(files[definition].decode("utf-8")).encode("utf-8")
+            changes[records] = _clear_pivot_cache_records(files[records].decode("utf-8")).encode("utf-8")
             continue
         workbook_changed = True
         worksheet_name = action["worksheet"]
@@ -1110,6 +1344,19 @@ def _approved_worksheet_changes_match(
             original[target].decode("utf-8"), action.get("cell_references", [])
         ).encode("utf-8")
         if candidate[target] != expected:
+            return False
+    for action in (plan or {}).get("actions", []):
+        if action.get("kind") != "clear_pivot_cache_values":
+            continue
+        definition = action.get("definition_member")
+        records = action.get("records_member")
+        if not isinstance(definition, str) or not isinstance(records, str):
+            return False
+        if definition not in original or definition not in candidate or records not in original or records not in candidate:
+            return False
+        if candidate[definition] != _clear_pivot_cache_definition(original[definition].decode("utf-8")).encode("utf-8"):
+            return False
+        if candidate[records] != _clear_pivot_cache_records(original[records].decode("utf-8")).encode("utf-8"):
             return False
     return True
 

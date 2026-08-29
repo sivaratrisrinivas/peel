@@ -103,7 +103,17 @@ export interface ClearHiddenCellValuesAction {
   capability_losses: string[];
 }
 
-export type RepairAction = DeleteHiddenWorksheetAction | ClearHiddenCellValuesAction;
+export interface ClearPivotCacheValuesAction {
+  kind: "clear_pivot_cache_values";
+  worksheet: string;
+  target_member: string;
+  definition_member: string;
+  records_member: string;
+  changed_members: string[];
+  capability_losses: string[];
+}
+
+export type RepairAction = DeleteHiddenWorksheetAction | ClearHiddenCellValuesAction | ClearPivotCacheValuesAction;
 
 export interface DependencyAnalysis {
   visible_formulas: string[];
