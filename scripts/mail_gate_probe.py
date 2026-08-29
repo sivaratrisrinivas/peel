@@ -172,11 +172,12 @@ def _uidvalidity(client: imaplib.IMAP4_SSL) -> str:
     raise RuntimeError("IMAP did not return UIDVALIDITY")
 
 
-def _fetch_bytes(client: imaplib.IMAP4_SSL, message_id: bytes, query: str) -> bytes:
+def _fetch_bytes(client: imaplib.IMAP4_SSL, message_id: bytes, query: str) -> bytes | None:
     fetch_status, fetched = client.uid("fetch", message_id.decode("ascii", errors="replace"), query)
-    if fetch_status != "OK" or not fetched:
-        return b""
-    return b"".join(item[1] for item in fetched if isinstance(item, tuple) and len(item) == 2)
+    if fetch_status != "OK":
+        raise imaplib.IMAP4.error(f"IMAP fetch failed for UID {message_id!r}")
+    raw = b"".join(item[1] for item in fetched or [] if isinstance(item, tuple) and len(item) == 2)
+    return raw or None
 
 
 def _header_may_be_eligible(message: EmailMessage, allowed_recipient: str | None = None) -> bool:
@@ -204,13 +205,13 @@ def _read_scan_cursor(
     mailbox: str,
     folder_uidvalidity: str,
     message_ids: list[bytes],
-) -> int:
+) -> tuple[int, bool]:
     if not message_ids:
-        return 0
+        return 0, False
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
-        return 0
+        return 0, False
     if not isinstance(state, dict) or any(
         state.get(key) != value
         for key, value in (
@@ -221,15 +222,15 @@ def _read_scan_cursor(
             ("folder_uidvalidity", folder_uidvalidity),
         )
     ):
-        return 0
+        return 0, False
     next_message_uid = state.get("next_message_uid")
     if not isinstance(next_message_uid, str):
-        return 0
+        return 0, False
     ordered_ids = list(reversed(message_ids))
     try:
-        return ordered_ids.index(next_message_uid.encode("ascii"))
+        return ordered_ids.index(next_message_uid.encode("ascii")), bool(state.get("repeat_current"))
     except (ValueError, UnicodeEncodeError):
-        return 0
+        return 0, False
 
 
 def _write_scan_cursor(
@@ -241,6 +242,7 @@ def _write_scan_cursor(
     mailbox: str,
     folder_uidvalidity: str,
     message_id: bytes,
+    repeat_current: bool,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -254,6 +256,7 @@ def _write_scan_cursor(
                 "imap_mailbox": mailbox,
                 "folder_uidvalidity": folder_uidvalidity,
                 "next_message_uid": message_id.decode("ascii", errors="replace"),
+                "repeat_current": repeat_current,
             },
             sort_keys=True,
         )
@@ -290,7 +293,7 @@ def _retrieve_eligible_draft(
             return None
         message_ids = data[0].split()
         ordered_ids = list(reversed(message_ids))
-        scan_start = _read_scan_cursor(
+        scan_start, repeat_current = _read_scan_cursor(
             cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
             host=host,
             port=port,
@@ -302,7 +305,7 @@ def _retrieve_eligible_draft(
         scan_ids = [
             ordered_ids[(scan_start + offset) % len(ordered_ids)]
             for offset in range(min(max_messages, len(ordered_ids)))
-        ]
+            ]
         for offset, message_id in enumerate(scan_ids):
             header_raw = _fetch_bytes(client, message_id, "(BODY.PEEK[HEADER])")
             if not header_raw:
@@ -321,7 +324,10 @@ def _retrieve_eligible_draft(
                 message_uid=message_id.decode("ascii", errors="replace"),
             )
             if parsed is not None:
-                next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
+                if repeat_current:
+                    next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
+                else:
+                    next_id = message_id
                 _write_scan_cursor(
                     cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
                     host=host,
@@ -330,6 +336,7 @@ def _retrieve_eligible_draft(
                     mailbox=mailbox,
                     folder_uidvalidity=folder_uidvalidity,
                     message_id=next_id,
+                    repeat_current=not repeat_current,
                 )
                 return parsed
         next_id = ordered_ids[(scan_start + len(scan_ids)) % len(ordered_ids)]
@@ -341,6 +348,7 @@ def _retrieve_eligible_draft(
             mailbox=mailbox,
             folder_uidvalidity=folder_uidvalidity,
             message_id=next_id,
+            repeat_current=False,
         )
         return None
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import imaplib
 import json
 import os
+import pytest
 import subprocess
 import sys
 import zipfile
@@ -221,7 +223,11 @@ def test_mail_retrieval_batches_uids_and_wraps_with_a_persistent_cursor(monkeypa
 
     assert found is not None
     assert found.message_uid == "1"
-    assert fake.fetch_counts == [4, 4, 2]
+    repeated = mail_gate_probe._retrieve_eligible_draft(max_messages=2, cursor_path=cursor)
+
+    assert repeated is not None
+    assert repeated.message_uid == "1"
+    assert fake.fetch_counts == [4, 4, 2, 2]
     assert json.loads(cursor.read_text(encoding="utf-8"))["folder_uidvalidity"] == "uidvalidity-1"
 
 
@@ -279,6 +285,60 @@ def test_mail_retrieval_does_not_reuse_cursor_across_mailbox_accounts(monkeypatc
 
     assert found is not None
     assert found.message_uid == "3"
+
+
+def test_mail_retrieval_preserves_cursor_when_an_imap_fetch_fails(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("IMAP_USERNAME", "sender@example.com")
+    monkeypatch.setenv("IMAP_PASSWORD", "password")
+    monkeypatch.setenv("PEEL_OWNED_RECIPIENT", "owned@example.com")
+    message = EmailMessage()
+    message["From"] = "sender@example.com"
+    message["To"] = "owned@example.com"
+    message["Subject"] = "Eligible after retry"
+    message.set_content("Intended disclosure: visible workbook only.")
+    message.add_attachment(b"xlsx", maintype="application", subtype="octet-stream", filename="retry.xlsx")
+
+    class FakeImap:
+        failed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def login(self, _username, _password):
+            return "OK", []
+
+        def select(self, _mailbox, readonly=True):
+            assert readonly is True
+            return "OK", []
+
+        def response(self, name):
+            assert name == "UIDVALIDITY"
+            return "OK", [b"uidvalidity-1"]
+
+        def uid(self, operation, _message_id, _query=None):
+            if operation == "search":
+                return "OK", [b"1"]
+            assert operation == "fetch"
+            if not self.failed:
+                self.failed = True
+                return "NO", []
+            return "OK", [(b"RFC822", message.as_bytes())]
+
+    fake = FakeImap()
+    monkeypatch.setattr(mail_gate_probe.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: fake)
+    cursor = tmp_path / "mailbox-cursor.json"
+
+    with pytest.raises(imaplib.IMAP4.error):
+        mail_gate_probe._retrieve_eligible_draft(cursor_path=cursor)
+    assert not cursor.exists()
+
+    found = mail_gate_probe._retrieve_eligible_draft(cursor_path=cursor)
+    assert found is not None
+    assert found.message_uid == "1"
 
 
 def test_mail_retrieval_configures_an_imap_socket_timeout(monkeypatch) -> None:
