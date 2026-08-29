@@ -256,10 +256,10 @@ def _pivot_cache_infos(files: dict[str, bytes], sheets: list[dict[str, str]]) ->
         worksheet_source = next((element for element in definition.iter() if _element_name(element) == "worksheetsource"), None)
         source_name = _decode_xml(worksheet_source.attrib.get("sheet", "pivot-cache")) if worksheet_source is not None else "pivot-cache"
         shared_items: list[list[str]] = []
-        for field in definition.iter():
-            if _element_name(field) != "cachefield":
+        for field_element in definition.iter():
+            if _element_name(field_element) != "cachefield":
                 continue
-            shared = next((element for element in field if _element_name(element) == "shareditems"), None)
+            shared = next((element for element in field_element if _element_name(element) == "shareditems"), None)
             shared_items.append(
                 [_xml_value(element) for element in list(shared or []) if _element_name(element) in {"s", "n", "d", "b", "e", "m"}]
             )
@@ -281,16 +281,16 @@ def _pivot_cache_infos(files: dict[str, bytes], sheets: list[dict[str, str]]) ->
                 for record in [element for element in records_root if _element_name(element) == "r"]:
                     values: list[str] = []
                     valid = True
-                    for value in list(record):
-                        tag = _element_name(value)
-                        raw = _xml_value(value)
+                    for value_element in list(record):
+                        tag = _element_name(value_element)
+                        raw = _xml_value(value_element)
                         if tag == "x":
                             index = int(raw) if raw.isdigit() else -1
-                            field = shared_items[len(values)] if len(values) < len(shared_items) else []
-                            if index < 0 or index >= len(field):
+                            shared_values = shared_items[len(values)] if len(values) < len(shared_items) else []
+                            if index < 0 or index >= len(shared_values):
                                 valid = False
                                 break
-                            values.append(field[index])
+                            values.append(shared_values[index])
                         elif tag in {"s", "n", "d", "b", "e", "m"}:
                             values.append(raw)
                     if valid:
