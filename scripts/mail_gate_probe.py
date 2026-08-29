@@ -264,11 +264,9 @@ def _write_scan_cursor(
 
 
 def _retrieve_eligible_draft(
-    *, max_messages: int | None = None, cursor_path: Path | None = None
+    *, max_messages: int = DEFAULT_DRAFT_SCAN_BATCH, cursor_path: Path | None = None
 ) -> RetrievedDraft | None:
-    if max_messages is not None and (
-        not isinstance(max_messages, int) or max_messages <= 0 or max_messages > MAX_DRAFT_SCAN_BATCH
-    ):
+    if not isinstance(max_messages, int) or max_messages <= 0 or max_messages > MAX_DRAFT_SCAN_BATCH:
         raise ValueError(f"max_messages must be between 1 and {MAX_DRAFT_SCAN_BATCH}")
     host = os.environ["IMAP_HOST"]
     username = os.environ["IMAP_USERNAME"]
@@ -292,31 +290,26 @@ def _retrieve_eligible_draft(
             return None
         message_ids = data[0].split()
         ordered_ids = list(reversed(message_ids))
-        scan_start = 0
-        if max_messages is not None:
-            scan_start = _read_scan_cursor(
-                cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
-                host=host,
-                port=port,
-                username=username,
-                mailbox=mailbox,
-                folder_uidvalidity=folder_uidvalidity,
-                message_ids=message_ids,
-            )
-            scan_ids = [
-                ordered_ids[(scan_start + offset) % len(ordered_ids)]
-                for offset in range(min(max_messages, len(ordered_ids)))
-            ]
-        else:
-            scan_ids = ordered_ids
+        scan_start = _read_scan_cursor(
+            cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+            host=host,
+            port=port,
+            username=username,
+            mailbox=mailbox,
+            folder_uidvalidity=folder_uidvalidity,
+            message_ids=message_ids,
+        )
+        scan_ids = [
+            ordered_ids[(scan_start + offset) % len(ordered_ids)]
+            for offset in range(min(max_messages, len(ordered_ids)))
+        ]
         for offset, message_id in enumerate(scan_ids):
-            header_raw = _fetch_bytes(client, message_id, "(BODY.PEEK[HEADER])") if max_messages is not None else b""
-            if max_messages is not None:
-                if not header_raw:
-                    continue
-                header = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(header_raw))
-                if not _header_may_be_eligible(header):
-                    continue
+            header_raw = _fetch_bytes(client, message_id, "(BODY.PEEK[HEADER])")
+            if not header_raw:
+                continue
+            header = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(header_raw))
+            if not _header_may_be_eligible(header):
+                continue
             raw = _fetch_bytes(client, message_id, "(RFC822)")
             if not raw:
                 continue
@@ -328,29 +321,27 @@ def _retrieve_eligible_draft(
                 message_uid=message_id.decode("ascii", errors="replace"),
             )
             if parsed is not None:
-                if max_messages is not None:
-                    next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
-                    _write_scan_cursor(
-                        cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
-                        host=host,
-                        port=port,
-                        username=username,
-                        mailbox=mailbox,
-                        folder_uidvalidity=folder_uidvalidity,
-                        message_id=next_id,
-                    )
+                next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
+                _write_scan_cursor(
+                    cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+                    host=host,
+                    port=port,
+                    username=username,
+                    mailbox=mailbox,
+                    folder_uidvalidity=folder_uidvalidity,
+                    message_id=next_id,
+                )
                 return parsed
-        if max_messages is not None:
-            next_id = ordered_ids[(scan_start + len(scan_ids)) % len(ordered_ids)]
-            _write_scan_cursor(
-                cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
-                host=host,
-                port=port,
-                username=username,
-                mailbox=mailbox,
-                folder_uidvalidity=folder_uidvalidity,
-                message_id=next_id,
-            )
+        next_id = ordered_ids[(scan_start + len(scan_ids)) % len(ordered_ids)]
+        _write_scan_cursor(
+            cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+            host=host,
+            port=port,
+            username=username,
+            mailbox=mailbox,
+            folder_uidvalidity=folder_uidvalidity,
+            message_id=next_id,
+        )
         return None
 
 

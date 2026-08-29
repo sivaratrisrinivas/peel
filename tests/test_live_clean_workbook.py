@@ -109,7 +109,7 @@ def test_live_mail_parser_returns_a_bounded_draft_envelope(monkeypatch) -> None:
     assert draft.folder_uidvalidity == "uidvalidity-1"
 
 
-def test_mail_retrieval_scans_past_newer_ineligible_drafts(monkeypatch) -> None:
+def test_mail_retrieval_bounds_a_single_scan_batch(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("IMAP_HOST", "imap.example.com")
     monkeypatch.setenv("IMAP_USERNAME", "sender@example.com")
     monkeypatch.setenv("IMAP_PASSWORD", "password")
@@ -158,11 +158,10 @@ def test_mail_retrieval_scans_past_newer_ineligible_drafts(monkeypatch) -> None:
     fake = FakeImap()
     monkeypatch.setattr(mail_gate_probe.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: fake)
 
-    draft = mail_gate_probe._retrieve_eligible_draft()
+    draft = mail_gate_probe._retrieve_eligible_draft(cursor_path=tmp_path / "mailbox-cursor.json")
 
-    assert draft is not None
-    assert draft.message_uid == "1"
-    assert fake.fetch_count == 101
+    assert draft is None
+    assert fake.fetch_count == 50
 
 
 def test_mail_retrieval_batches_uids_and_wraps_with_a_persistent_cursor(monkeypatch, tmp_path: Path) -> None:
