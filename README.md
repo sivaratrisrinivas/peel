@@ -186,6 +186,12 @@ Qodo reviewed [PR #14](https://github.com/sivaratrisrinivas/peel/pull/14#issueco
 and found zero bugs, rule violations, or requirement gaps. Its [final pass](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460483810)
 also found none. No findings were dismissed or deferred.
 
+Qodo's [initial review](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460451535)
+for commit `e407337` reported zero bugs, rule violations, and requirement gaps.
+The [follow-up update](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460458988)
+confirmed the review through that final implementation commit. No findings were
+dismissed or deferred.
+
 ## Current status
 
 Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
