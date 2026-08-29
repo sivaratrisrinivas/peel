@@ -16,8 +16,9 @@ The two core journeys in scope are:
    the complete dependency analysis is empty, the atomic plan is approved, and
 Verification proves the supported visible baseline.
 
-Completed optional journeys from issues #8 and #9 are also included when their
-documented dependency and fidelity limits are met.
+The hidden-row/column and pivot-cache journeys from issues #8 and #9 remain
+outside this submission qualification. They are not counted as supported
+optional journeys until they have their own end-to-end qualification evidence.
 
 The completed and verified Gmail Mailbox Trigger from issue #7 is an optional
 intake route. It is not required for the core qualification and can be used

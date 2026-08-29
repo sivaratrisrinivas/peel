@@ -86,6 +86,9 @@ SECRET_SIGNATURES = (
     re.compile(rb"\bsk-[A-Za-z0-9]{20,}\b"),
 )
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsm", ".xlsb"}
+APPROVED_WORKBOOK_FIXTURES = {
+    "tests/fixtures/pivot-cache-only.xlsx": "d4cb6df960f3d5780e89577db206d2068d75428851b0dafe2fd008af12d44167",
+}
 CONFIGURATION_NAMES = (
     "CEREBRAS_API_KEY",
     "TRUEFORGE_API_KEY",
@@ -258,13 +261,19 @@ def tracked_paths(repo_root: Path) -> list[Path]:
     return [repo_root / item for item in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item]
 
 
-def check_repository_hygiene(paths: Sequence[Path]) -> list[str]:
+def check_repository_hygiene(paths: Sequence[Path], repo_root: Path | None = None) -> list[str]:
     """Check tracked files for generated workbooks and common secret signatures."""
 
     violations: set[str] = set()
     for path in paths:
-        is_checked_in_fixture = path.parent.name == "fixtures" and path.parent.parent.name == "tests"
-        if path.suffix.lower() in WORKBOOK_SUFFIXES and not is_checked_in_fixture:
+        relative_path = None
+        if repo_root is not None:
+            try:
+                relative_path = path.resolve().relative_to(repo_root.resolve()).as_posix()
+            except ValueError:
+                relative_path = None
+        approved_hash = APPROVED_WORKBOOK_FIXTURES.get(relative_path or "")
+        if path.suffix.lower() in WORKBOOK_SUFFIXES and approved_hash is None:
             violations.add("generated_workbook")
         if path.name == ".env":
             violations.add("tracked_env")
@@ -276,6 +285,9 @@ def check_repository_hygiene(paths: Sequence[Path]) -> list[str]:
         if len(data) > MAX_INSPECTED_FILE_BYTES:
             violations.add("tracked_file_too_large")
             continue
+        if path.suffix.lower() in WORKBOOK_SUFFIXES and approved_hash is not None:
+            if hashlib.sha256(data).hexdigest() != approved_hash:
+                violations.add("generated_workbook")
         if any(pattern.search(data) for pattern in SECRET_SIGNATURES):
             violations.add("secret_signature")
     return sorted(violations)
@@ -588,7 +600,7 @@ def main() -> int:
 
     evidence = qualify_privacy_manifest(args.manifest, args.forbidden_file)
     try:
-        hygiene = check_repository_hygiene(tracked_paths(args.repo_root))
+        hygiene = check_repository_hygiene(tracked_paths(args.repo_root), args.repo_root)
     except OSError:
         hygiene = ["tracked_file_listing_unavailable"]
     evidence["repository_hygiene"] = "pass" if not hygiene else "blocked"

@@ -13,10 +13,12 @@ This repository packages the two core journeys in scope for the hackathon:
   analysis proves it safe, one atomic Repair Plan followed by Verification.
 
 The completed and verified Gmail Mailbox Trigger from issue [#7] is an optional
-supported intake route; the manual trigger remains the fallback. The completed
-optional hidden-row/column and pivot-cache journeys from issues [#8] and [#9]
-are supported within their documented limits. Sensitive Reveal values are cut;
-only metadata and an ephemeral, local Reveal Reference are supported.
+supported intake route; the manual trigger remains the fallback. The
+hidden-row/column and pivot-cache journeys from issues [#8] and [#9] remain
+outside this submission qualification. Their implementation notes describe
+their limits, but neither journey is an end-to-end supported scope claim here.
+Sensitive Reveal values are cut; only metadata and an ephemeral, local Reveal
+Reference are supported.
 
 ## Supported scope
 
@@ -26,10 +28,11 @@ external connections, unknown content-bearing members, malformed packages,
 unsupported extensions, and any unproven fidelity result in Refusal. A clean
 artifact is disclosed without rewriting its bytes.
 
-The supported deterministic Findings cover hidden worksheets, hidden rows or columns,
-and the documented worksheet-sourced pivot-cache case. Each mechanism
-has explicit dependency and fidelity limits; an artifact containing an
-unsupported or unproven mechanism must not be presented as globally clean.
+The supported deterministic Finding for this submission is an unreferenced
+hidden worksheet. Hidden rows or columns and pivot-cache content remain cuts
+from the qualification profile. Each mechanism has explicit dependency and
+fidelity limits; an artifact containing an unsupported or unproven mechanism
+must not be presented as globally clean.
 The Scope Assessment is advisory and one-way: `no_mismatch_found` means only
 that no mismatch was found in bounded evidence; `mismatch` or
 `insufficient_context` blocks progress and never grants authorization.
@@ -98,8 +101,8 @@ documented in [`docs/runbook.md`](docs/runbook.md).
 
 The prior core live proof is recorded in [the issue #4 verification
 comment](https://github.com/sivaratrisrinivas/peel/issues/4#issuecomment-5458840107).
-The final issue #10 qualification passed on 2026-08-30 in WSL2/Ubuntu: two
-complete rehearsals returned `demo_ready` with unchanged code and configuration.
+The final issue #10 qualification run in WSL2/Ubuntu passed: two complete
+rehearsals returned `demo_ready` with unchanged code and configuration.
 The bounded records remain outside the repository under `/tmp`.
 
 ## Why and how submission qualification works
@@ -265,26 +268,24 @@ The repository's substantive slices received Qodo review before their merges:
 | Environment gate | [#11](https://github.com/sivaratrisrinivas/peel/pull/11) | [clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/11#issuecomment-5447407850) |
 | Gmail Mailbox Trigger | [#12](https://github.com/sivaratrisrinivas/peel/pull/12) | [clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770) |
 | Hidden worksheet Repair | [#13](https://github.com/sivaratrisrinivas/peel/pull/13) | [initial review](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5459968817), [follow-up](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460285686) |
-| Submission qualification | [#15](https://github.com/sivaratrisrinivas/peel/pull/15) | [initial review](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460580573), [final clean follow-up](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460678826) |
+| Submission qualification | [#15](https://github.com/sivaratrisrinivas/peel/pull/15) | [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460580573) |
 
-For PR #15, the initial Qodo review and successive follow-ups found and
-resolved recipient-evidence, serialized-privacy, SQLite casing, encoded-field,
-and numeric-value issues. The final follow-up against commit `ed80d2e` reports
-zero Bugs, rule violations, and skill insights; no finding was dismissed or
-deferred.
+For PR #15, Qodo reviewed the qualification gates and the follow-up fixes.
+The linked review records the final status for the branch, including any
+finding and its resolution. No findings were dismissed or deferred.
 
 The current architecture and environment decision is
 [ADR-0026](docs/adr/0026-current-architecture-and-environment-gate.md). The
 full runbook is [`docs/runbook.md`](docs/runbook.md). The project is released
 under the [MIT License](LICENSE).
 
-Three optional routes remain cuts. Sensitive Reveal values stay metadata-only
-until a private transport and retention path is proven. LibreOffice-dependent
-reopen checks remain cut because no supported binary was available on the gate
-host. The issue #8 focused suites include deterministic pivot dependency
-fixtures; a trusted raw `.xlsx` fixture with complete pivot-cache parts remains
-cut because neither the repository nor the connected Drive account provided
-one.
+The issue #8 hidden-row/column and issue #9 pivot-cache journeys remain cuts
+from this submission profile. Sensitive Reveal values stay metadata-only until
+a private transport and retention path is proven. LibreOffice-dependent reopen
+checks remain cut because no supported binary was available on the gate host.
+The issue #8 focused suites include deterministic pivot dependency fixtures; a
+trusted raw `.xlsx` fixture with complete pivot-cache parts remains cut because
+neither the repository nor the connected Drive account provided one.
 
 ## Deterministic checks
 

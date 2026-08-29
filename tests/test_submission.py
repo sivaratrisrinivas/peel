@@ -235,7 +235,12 @@ def test_repository_hygiene_rejects_workbooks_and_secret_signatures(tmp_path: Pa
     fixture = tmp_path / "tests" / "fixtures" / "representative.xlsx"
     fixture.parent.mkdir(parents=True)
     fixture.write_bytes(b"PK\x03\x04")
-    assert submission_qualification.check_repository_hygiene([fixture]) == []
+    assert "generated_workbook" in submission_qualification.check_repository_hygiene(
+        [fixture], repo_root=tmp_path
+    )
+
+    approved_fixture = ROOT / "tests" / "fixtures" / "pivot-cache-only.xlsx"
+    assert submission_qualification.check_repository_hygiene([approved_fixture], repo_root=ROOT) == []
 
     workbook = tmp_path / "generated.xlsx"
     workbook.write_bytes(b"PK\x03\x04")
