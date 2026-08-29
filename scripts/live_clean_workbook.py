@@ -310,7 +310,7 @@ def _trueforge_workflow(
     trueforge_url: str,
     trueforge_token: str | None,
     evidence: dict[str, Any],
-) -> None:
+) -> str:
     peel_server_name = "peel-live-clean-workbook"
     peel_url = client.base_url + "/mcp"
     api = _API(trueforge_url, trueforge_token)
@@ -497,6 +497,9 @@ def _trueforge_workflow(
     if not _turn_completed_or_rate_limited(third_events) or third_names != ["request_disclosure"] or not _is_serial(third_events):
         raise LiveFailure("fresh_approval_turn_invalid")
     fresh_approval = _approval_from_tool_response(third_events)
+    fresh_idempotency_key = fresh_approval.get("idempotency_key")
+    if not isinstance(fresh_idempotency_key, str) or not fresh_idempotency_key:
+        raise LiveFailure("fresh_approval_invalid")
     evidence["fresh_disclosure_approval_observed"] = (
         fresh_approval.get("approval_id") != approval.get("approval_id")
         and fresh_approval.get("idempotency_key") != approval.get("idempotency_key")
@@ -547,6 +550,7 @@ def _trueforge_workflow(
     )
     if not evidence["serial_tool_loop_executed"]:
         raise LiveFailure("parallel_tool_call_observed")
+    return fresh_idempotency_key
 
 
 def _approved_tool_response_is_success(events: list[dict[str, Any]], call_id: str) -> bool:
@@ -570,6 +574,7 @@ def _matching_recipient_messages(
     subject: str,
     artifact_filename: str,
     artifact_sha256: str,
+    idempotency_key: str,
 ) -> int:
     host = os.environ.get("PEEL_RECIPIENT_IMAP_HOST", os.environ.get("IMAP_HOST", ""))
     username = os.environ.get("PEEL_RECIPIENT_IMAP_USERNAME", os.environ.get("IMAP_USERNAME", ""))
@@ -605,6 +610,8 @@ def _matching_recipient_messages(
                 continue
             if str(message.get("Subject", "")).strip() != subject:
                 continue
+            if str(message.get("X-Peel-Disclosure-Idempotency-Key", "")).strip() != idempotency_key:
+                continue
             attachments = []
             for part in message.walk():
                 filename = part.get_filename() or ""
@@ -625,6 +632,7 @@ def _await_recipient_confirmation(
     subject: str,
     artifact_filename: str,
     artifact_sha256: str,
+    idempotency_key: str,
 ) -> int:
     deadline = time.monotonic() + timeout_seconds
     matches = 0
@@ -635,6 +643,7 @@ def _await_recipient_confirmation(
             subject=subject,
             artifact_filename=artifact_filename,
             artifact_sha256=artifact_sha256,
+            idempotency_key=idempotency_key,
         )
         if matches == 1:
             return matches
@@ -713,7 +722,7 @@ def run(args: argparse.Namespace) -> int:
             run_view = stage.get("run")
             if not isinstance(run_view, dict):
                 raise LiveFailure("stage_run_missing")
-            _trueforge_workflow(
+            approved_idempotency_key = _trueforge_workflow(
                 daemon,
                 run_view,
                 audit_path,
@@ -729,6 +738,7 @@ def run(args: argparse.Namespace) -> int:
                 subject=draft.subject,
                 artifact_filename=draft.attachment_filename,
                 artifact_sha256=artifact["sha256"],
+                idempotency_key=approved_idempotency_key,
             )
             evidence["recipient_matching_messages"] = matches
             evidence["recipient_confirmation"] = matches == 1

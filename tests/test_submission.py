@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -129,6 +131,45 @@ def test_privacy_qualification_rejects_prohibited_persistent_fields(tmp_path: Pa
     corpus = tmp_path / "private-values.txt"
     corpus.write_text("private", encoding="utf-8")
 
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "prohibited_field"
+
+
+def test_privacy_qualification_rejects_json_escaped_and_base64_values(tmp_path: Path) -> None:
+    manifest, paths = complete_manifest(tmp_path)
+    corpus = tmp_path / "private-values.txt"
+    corpus.write_text("fictional snowman ☃", encoding="utf-8")
+
+    paths[2].write_text(
+        json.dumps({"payload": "fictional snowman ☃"}, ensure_ascii=True), encoding="utf-8"
+    )
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "forbidden_value_found"
+
+    attachment_value = b"fictional attachment bytes"
+    corpus.write_bytes(attachment_value)
+    paths[2].write_text(
+        json.dumps({"payload": base64.b64encode(attachment_value).decode("ascii")}), encoding="utf-8"
+    )
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "forbidden_value_found"
+
+
+def test_privacy_qualification_rejects_mixed_case_sqlite_prohibited_fields(tmp_path: Path) -> None:
+    manifest, _ = complete_manifest(tmp_path)
+    sqlite_path = tmp_path / "surface.sqlite"
+    with sqlite3.connect(sqlite_path) as database:
+        database.execute('CREATE TABLE records ("DRAFT_BODY" TEXT)')
+        database.execute("INSERT INTO records VALUES (?)", ("not retained",))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["entries"][1]["path"] = str(sqlite_path)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    corpus = tmp_path / "private-values.txt"
+    corpus.write_text("private", encoding="utf-8")
     result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
     assert result["status"] == "blocked"
     assert result["failure_code"] == "prohibited_field"

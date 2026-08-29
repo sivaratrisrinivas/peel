@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from scripts import daytona_engine
+from scripts import live_clean_workbook
 from scripts import mail_gate_probe
+from scripts import smtp_delivery_bridge
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -429,6 +431,86 @@ def test_mail_retrieval_configures_an_imap_socket_timeout(monkeypatch) -> None:
 
     assert mail_gate_probe._retrieve_eligible_draft() is None
     assert captured["timeout"] == 20.0
+
+
+def test_live_recipient_confirmation_requires_the_current_disclosure_attempt(monkeypatch) -> None:
+    attachment = b"verified workbook bytes"
+    digest = hashlib.sha256(attachment).hexdigest()
+
+    def message(attempt: str) -> bytes:
+        email = EmailMessage()
+        email["From"] = "sender@example.com"
+        email["To"] = "owned@example.com"
+        email["Subject"] = "Clean workbook"
+        email["X-Peel-Disclosure-Idempotency-Key"] = attempt
+        email.set_content("Intended disclosure: visible workbook only.")
+        email.add_attachment(
+            attachment,
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="clean.xlsx",
+        )
+        return email.as_bytes()
+
+    messages = {b"1": message("old-attempt"), b"2": message("current-attempt")}
+
+    class FakeImap:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def login(self, _username, _password):
+            return "OK", []
+
+        def select(self, _mailbox, readonly=True):
+            assert readonly is True
+            return "OK", []
+
+        def uid(self, operation, message_id, _query=None):
+            if operation == "search":
+                return "OK", [b"1 2"]
+            assert operation == "fetch"
+            return "OK", [(b"RFC822", messages[message_id])]
+
+    monkeypatch.setenv("PEEL_RECIPIENT_IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("PEEL_RECIPIENT_IMAP_USERNAME", "owned@example.com")
+    monkeypatch.setenv("PEEL_RECIPIENT_IMAP_PASSWORD", "password")
+    monkeypatch.setattr(live_clean_workbook.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: FakeImap())
+
+    assert (
+        live_clean_workbook._matching_recipient_messages(
+            sender="sender@example.com",
+            recipient="owned@example.com",
+            subject="Clean workbook",
+            artifact_filename="clean.xlsx",
+            artifact_sha256=digest,
+            idempotency_key="current-attempt",
+        )
+        == 1
+    )
+
+
+def test_smtp_bridge_carries_the_opaque_disclosure_attempt_identity() -> None:
+    payload = b"verified workbook bytes"
+    message = smtp_delivery_bridge._message(
+        {
+            "sender": "sender@example.com",
+            "recipient": "owned@example.com",
+            "subject": "Clean workbook",
+            "body": "Intended disclosure: visible workbook only.",
+            "idempotency_key": "current-attempt",
+            "attachment": {
+                "filename": "clean.xlsx",
+                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+        },
+        payload,
+    )
+
+    assert message["X-Peel-Disclosure-Idempotency-Key"] == "current-attempt"
 
 
 def test_live_runner_is_invocable_as_a_script_and_fails_closed_without_configuration(

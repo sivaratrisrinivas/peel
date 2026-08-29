@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -69,6 +71,7 @@ FORBIDDEN_JSON_KEYS = {
     "credential",
     "credentials",
 }
+FORBIDDEN_JSON_KEYS_CASEFOLD = {key.casefold() for key in FORBIDDEN_JSON_KEYS}
 FORBIDDEN_KEY_PATTERN = re.compile(
     rb'"(?:draft_body|raw_body|message_body|reveal(?:_sample|_values)?|'
     rb"workbook_values|cell_values|attachment_bytes|raw_attachment|password|"
@@ -289,6 +292,23 @@ def _read_needles(paths: Sequence[Path]) -> list[bytes]:
     return needles
 
 
+def _needle_variants(needles: Sequence[bytes]) -> list[bytes]:
+    """Build encoded forms that can occur in JSON, SQLite, or serialized payloads."""
+
+    variants: set[bytes] = set(needles)
+    for needle in needles:
+        try:
+            text = needle.decode("utf-8")
+        except UnicodeDecodeError:
+            text = ""
+        if text:
+            variants.add(json.dumps(text, ensure_ascii=True).encode("utf-8"))
+            variants.add(json.dumps(text, ensure_ascii=False).encode("utf-8"))
+        variants.add(base64.b64encode(needle))
+        variants.add(base64.urlsafe_b64encode(needle))
+    return sorted(variants, key=len, reverse=True)
+
+
 def _iter_files(path: Path) -> list[Path]:
     if path.is_file():
         return [path]
@@ -299,7 +319,7 @@ def _iter_files(path: Path) -> list[Path]:
 
 def _json_has_prohibited_field(value: object) -> bool:
     if isinstance(value, dict):
-        if any(key in FORBIDDEN_JSON_KEYS for key in value):
+        if any(str(key).casefold() in FORBIDDEN_JSON_KEYS_CASEFOLD for key in value):
             return True
         return any(_json_has_prohibited_field(item) for item in value.values())
     if isinstance(value, list):
@@ -307,14 +327,50 @@ def _json_has_prohibited_field(value: object) -> bool:
     return False
 
 
-def _sqlite_has_prohibited_field(path: Path) -> bool:
+def _decode_base64(value: bytes) -> bytes | None:
+    if len(value) < 8:
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        try:
+            decoded = base64.urlsafe_b64decode(value + b"=" * (-len(value) % 4))
+        except (binascii.Error, ValueError):
+            return None
+    return decoded if decoded else None
+
+
+def _serialized_value_contains_needle(value: bytes, needles: Sequence[bytes]) -> bool:
+    if _contains_needle(value, needles):
+        return True
+    decoded = _decode_base64(value)
+    return decoded is not None and _contains_needle(decoded, needles)
+
+
+def _json_contains_prohibited_value(value: object, needles: Sequence[bytes]) -> bool:
+    if isinstance(value, dict):
+        return any(_json_contains_prohibited_value(item, needles) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_contains_prohibited_value(item, needles) for item in value)
+    if isinstance(value, str):
+        return _serialized_value_contains_needle(value.encode("utf-8"), needles)
+    return False
+
+
+def _sqlite_has_prohibited_field(path: Path, needles: Sequence[bytes]) -> bool:
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
         tables = [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
         for table in tables:
             identifier = '"' + str(table).replace('"', '""') + '"'
             columns = [row[1] for row in database.execute(f"PRAGMA table_info({identifier})")]
-            if any(column in FORBIDDEN_JSON_KEYS for column in columns):
+            if any(str(column).casefold() in FORBIDDEN_JSON_KEYS_CASEFOLD for column in columns):
                 return True
+            for row in database.execute(f"SELECT * FROM {identifier}"):
+                for value in row:
+                    if isinstance(value, bytes) and _serialized_value_contains_needle(value, needles):
+                        return True
+                    if isinstance(value, str) and _serialized_value_contains_needle(value.encode("utf-8"), needles):
+                        return True
     return False
 
 
@@ -354,6 +410,7 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
         return _failure("forbidden_corpus_unreadable")
     if not needles:
         return _failure("forbidden_corpus_empty")
+    encoded_needles = _needle_variants(needles)
 
     categories: set[str] = set()
     surface_paths: set[Path] = set()
@@ -405,19 +462,22 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
             return _failure("privacy_surface_unreadable", categories_inspected=len(categories))
         if len(data) > MAX_INSPECTED_FILE_BYTES:
             return _failure("privacy_surface_too_large", categories_inspected=len(categories))
-        if _contains_needle(data, needles):
+        if _contains_needle(data, encoded_needles):
             prohibited_values += 1
         if FORBIDDEN_KEY_PATTERN.search(data):
             prohibited_fields += 1
         if path.suffix.lower() == ".json":
             try:
-                if _json_has_prohibited_field(json.loads(data)):
+                decoded_json = json.loads(data)
+                if _json_has_prohibited_field(decoded_json):
                     prohibited_fields += 1
+                if _json_contains_prohibited_value(decoded_json, needles):
+                    prohibited_values += 1
             except (ValueError, UnicodeDecodeError):
                 pass
         if path.suffix.lower() in {".sqlite", ".db"}:
             try:
-                sqlite_has_prohibited_field = _sqlite_has_prohibited_field(path)
+                sqlite_has_prohibited_field = _sqlite_has_prohibited_field(path, needles)
             except (OSError, sqlite3.Error):
                 return _failure("sqlite_unreadable", categories_inspected=len(categories))
             if sqlite_has_prohibited_field:
