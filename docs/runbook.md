@@ -14,17 +14,19 @@ The two core journeys in scope are:
    approval, and owned-recipient confirmation by exact attachment hash.
 2. Hidden-worksheet inspection and Repair when the worksheet is unreferenced,
    the complete dependency analysis is empty, the atomic plan is approved, and
-   Verification proves the supported visible baseline.
+Verification proves the supported visible baseline.
+
+Completed optional journeys from issues #8 and #9 are also included when their
+documented dependency and fidelity limits are met.
 
 The completed and verified Gmail Mailbox Trigger from issue #7 is an optional
 intake route. It is not required for the core qualification and can be used
 when polling is available; the manual trigger remains the fallback.
 
-The following are explicit cuts for this submission:
+The following limits remain explicit cuts for this submission:
 
-- Hidden rows or columns: optional issue #8 remains open.
-- Pivot-cache values: optional issue #9 remains open and no trusted pivot
-  fixture/reopen qualification is recorded.
+- Hidden rows or columns outside the supported dependency checks.
+- External, incomplete, or otherwise unproven pivot-cache structures.
 - Sensitive Reveal values: only metadata and a short-lived local reference are
   retained; no provider-visible Reveal values are supported.
 - LibreOffice-dependent reopen coverage: not part of the demonstrated host

@@ -232,6 +232,11 @@ def test_repository_hygiene_rejects_workbooks_and_secret_signatures(tmp_path: Pa
     clean.write_text("safe", encoding="utf-8")
     assert submission_qualification.check_repository_hygiene([clean]) == []
 
+    fixture = tmp_path / "tests" / "fixtures" / "representative.xlsx"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(b"PK\x03\x04")
+    assert submission_qualification.check_repository_hygiene([fixture]) == []
+
     workbook = tmp_path / "generated.xlsx"
     workbook.write_bytes(b"PK\x03\x04")
     secret = tmp_path / "config.txt"

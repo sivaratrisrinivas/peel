@@ -259,11 +259,12 @@ def tracked_paths(repo_root: Path) -> list[Path]:
 
 
 def check_repository_hygiene(paths: Sequence[Path]) -> list[str]:
-    """Check a tracked-file set for generated workbooks and common secret signatures."""
+    """Check tracked files for generated workbooks and common secret signatures."""
 
     violations: set[str] = set()
     for path in paths:
-        if path.suffix.lower() in WORKBOOK_SUFFIXES:
+        is_checked_in_fixture = path.parent.name == "fixtures" and path.parent.parent.name == "tests"
+        if path.suffix.lower() in WORKBOOK_SUFFIXES and not is_checked_in_fixture:
             violations.add("generated_workbook")
         if path.name == ".env":
             violations.add("tracked_env")

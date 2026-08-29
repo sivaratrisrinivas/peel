@@ -26,8 +26,8 @@ external connections, unknown content-bearing members, malformed packages,
 unsupported extensions, and any unproven fidelity result in Refusal. A clean
 artifact is disclosed without rewriting its bytes.
 
-The supported deterministic Findings cover hidden worksheets, hidden rows and
-columns, and the documented worksheet-sourced pivot-cache case. Each mechanism
+The supported deterministic Findings cover hidden worksheets, hidden rows or columns,
+and the documented worksheet-sourced pivot-cache case. Each mechanism
 has explicit dependency and fidelity limits; an artifact containing an
 unsupported or unproven mechanism must not be presented as globally clean.
 The Scope Assessment is advisory and one-way: `no_mismatch_found` means only
