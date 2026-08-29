@@ -21,6 +21,8 @@ from typing import Any
 
 API_VERSION = "1"
 ENGINE_VERSION = "1.0.0"
+MAX_WORKSHEET_ROWS = 1_048_576
+MAX_WORKSHEET_COLUMNS = 16_384
 OUTPUT_PATH = "/tmp/peel-verified.xlsx"
 REPAIR_OUTPUT_PATH = "/tmp/peel-repaired.xlsx"
 
@@ -205,7 +207,12 @@ def _cell_info(reference: str) -> tuple[str, int, int] | None:
     if not match:
         return None
     column = _column_number(match.group(1))
-    row = int(match.group(2))
+    try:
+        row = int(match.group(2))
+    except ValueError:
+        return None
+    if column > MAX_WORKSHEET_COLUMNS or row > MAX_WORKSHEET_ROWS:
+        return None
     return f"{match.group(1).upper()}{row}", column, row
 
 
@@ -319,12 +326,28 @@ def _row_range_contains_targets(targets: list[tuple[str, int, int]], start: str,
     return any(min(start_row, end_row) <= target[2] <= max(start_row, end_row) for target in targets)
 
 
+def _sheet_in_span(
+    sheet: dict[str, str], first: str, last: str, sheet_order: list[dict[str, str]] | None
+) -> bool:
+    def normalized(name: str) -> str:
+        return name.replace("''", "'").strip().casefold()
+
+    ordered = sheet_order or []
+    target_index = next((index for index, candidate in enumerate(ordered) if normalized(candidate["name"]) == normalized(sheet["name"])), -1)
+    first_index = next((index for index, candidate in enumerate(ordered) if normalized(candidate["name"]) == normalized(first)), -1)
+    last_index = next((index for index, candidate in enumerate(ordered) if normalized(candidate["name"]) == normalized(last)), -1)
+    if target_index >= 0 and first_index >= 0 and last_index >= 0:
+        return min(first_index, last_index) <= target_index <= max(first_index, last_index)
+    return normalized(first) == normalized(sheet["name"]) or normalized(last) == normalized(sheet["name"])
+
+
 def _references_cells(
     text: str,
     sheet: dict[str, str],
     cells: list[str],
     current_sheet_path: str | None = None,
     allow_unqualified_when_unknown_sheet: bool = False,
+    sheet_order: list[dict[str, str]] | None = None,
 ) -> bool:
     targets = [cell for cell in (_cell_info(value) for value in cells) if cell is not None]
     if not targets:
@@ -340,6 +363,29 @@ def _references_cells(
     )
     for match in reference_pattern.finditer(decoded):
         if not sheet_matches(match):
+            continue
+        start = _cell_info(f"{match.group(3)}{match.group(4)}")
+        end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
+        if start and end and any(_cell_in_range(target, start, end) for target in targets):
+            return True
+    quoted_three_dimensional_pattern = re.compile(
+        r"'((?:[^']|'')+)'!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
+        re.IGNORECASE,
+    )
+    for match in quoted_three_dimensional_pattern.finditer(decoded):
+        names = (match.group(1) or "").split(":")
+        if len(names) != 2 or not _sheet_in_span(sheet, names[0], names[1], sheet_order):
+            continue
+        start = _cell_info(f"{match.group(2)}{match.group(3)}")
+        end = _cell_info(f"{match.group(4) or match.group(2)}{match.group(5) or match.group(3)}")
+        if start and end and any(_cell_in_range(target, start, end) for target in targets):
+            return True
+    three_dimensional_pattern = re.compile(
+        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
+        re.IGNORECASE,
+    )
+    for match in three_dimensional_pattern.finditer(decoded):
+        if not _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order):
             continue
         start = _cell_info(f"{match.group(3)}{match.group(4)}")
         end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
@@ -394,11 +440,32 @@ def _matching_elements_for_cells(
     cells: list[str],
     current_sheet_path: str | None = None,
     allow_unqualified_when_unknown_sheet: bool = False,
+    sheet_order: list[dict[str, str]] | None = None,
 ) -> bool:
-    return any(
-        _references_cells(match.group(0), sheet, cells, current_sheet_path, allow_unqualified_when_unknown_sheet)
-        for match in re.finditer(rf"<{_local_element(element)}\b[^>]*(?:/>|>[\s\S]*?</{_local_element(element)}>)", xml, re.IGNORECASE)
-    )
+    for match in re.finditer(rf"<{_local_element(element)}\b[^>]*(?:/>|>[\s\S]*?</{_local_element(element)}>)", xml, re.IGNORECASE):
+        element_xml = match.group(0)
+        if element.casefold() == "definedname":
+            attributes = re.search(rf"<{_local_element(element)}\b([^>]*)", element_xml, re.IGNORECASE)
+            local_sheet_id = _xml_attribute(attributes.group(1), "localSheetId") if attributes else None
+            if local_sheet_id is not None:
+                try:
+                    index = int(local_sheet_id)
+                except ValueError:
+                    return True
+                if index < 0 or sheet_order is None or index >= len(sheet_order):
+                    return True
+                if sheet_order[index]["path"] != sheet["path"]:
+                    continue
+                if _references_cells(element_xml, sheet, cells, sheet["path"], False, sheet_order):
+                    return True
+            elif _references_cells(element_xml, sheet, cells, None, True, sheet_order):
+                # Workbook-scoped relative names have no owning worksheet.
+                # Refuse conservatively when their coordinates could name a target.
+                return True
+            continue
+        if _references_cells(element_xml, sheet, cells, current_sheet_path, allow_unqualified_when_unknown_sheet, sheet_order):
+            return True
+    return False
 
 
 def _relationship_path_to_worksheet(
@@ -618,22 +685,22 @@ def _build_repair_plan(
         for member, payload in files.items():
             xml = payload.decode("utf-8", errors="strict") if member.endswith((".xml", ".rels")) else ""
             related_to_sheet = member == sheet["path"] or _member_is_related_to_worksheet(member, sheet["path"], relationships)
-            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "f", sheet, cells, member):
+            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "f", sheet, cells, member, False, sheets):
                 dependencies["visible_formulas"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("visible formula in " + member)
             if member == "xl/workbook.xml" and _matching_elements_for_cells(
-                xml, "definedName", sheet, cells, allow_unqualified_when_unknown_sheet=True
+                xml, "definedName", sheet, cells, sheet_order=sheets
             ):
                 dependencies["defined_names"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("defined name in xl/workbook.xml")
-            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "dataValidation", sheet, cells, member):
+            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "dataValidation", sheet, cells, member, False, sheets):
                 dependencies["data_validation"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("data validation in " + member)
             if member.startswith("xl/tables/") and member.endswith(".xml") and _references_cells(
-                xml, sheet, cells, sheet["path"] if related_to_sheet else None
+                xml, sheet, cells, sheet["path"] if related_to_sheet else None, False, sheets
             ):
                 dependencies["tables"].append(member)
                 dependent_members.add(member)
@@ -641,13 +708,13 @@ def _build_repair_plan(
             if (
                 (member.startswith("xl/charts/") or member.startswith("xl/drawings/"))
                 and member.endswith(".xml")
-                and _references_cells(xml, sheet, cells, sheet["path"] if related_to_sheet else None)
+                and _references_cells(xml, sheet, cells, sheet["path"] if related_to_sheet else None, False, sheets)
             ):
                 dependencies["charts"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("chart or drawing in " + member)
             if member.startswith("xl/pivot") and member.endswith(".xml") and _references_cells(
-                xml, sheet, cells, sheet["path"] if related_to_sheet else None
+                xml, sheet, cells, sheet["path"] if related_to_sheet else None, False, sheets
             ):
                 dependencies["pivots"].append(member)
                 dependent_members.add(member)

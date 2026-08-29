@@ -176,6 +176,59 @@ def test_issue8_engine_refuses_every_declared_dependency(tmp_path: Path) -> None
         assert result["repair_plan"]["refusal_reasons"]
 
 
+def test_issue8_engine_resolves_middle_sheets_in_3d_formula_ranges(tmp_path: Path) -> None:
+    workbook = (
+        '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+        '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+        '<sheet name="Sheet2" sheetId="2" r:id="rId2"/>'
+        '<sheet name="Sheet3" sheetId="3" r:id="rId3"/>'
+        '</sheets></workbook>'
+    )
+    extras = {
+        "xl/_rels/workbook.xml.rels": (
+            '<Relationships>'
+            '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+            '<Relationship Id="rId3" Target="worksheets/sheet3.xml"/>'
+            '</Relationships>'
+        ),
+        "xl/worksheets/sheet2.xml": '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>secret</v></c></row></sheetData></worksheet>',
+        "xl/worksheets/sheet3.xml": '<worksheet><sheetData/></worksheet>',
+    }
+    for index, formula in enumerate(("SUM(Sheet1:Sheet3!A2)", "SUM('Sheet1:Sheet3'!A2)")):
+        source = _package(
+            f'<worksheet><sheetData><row r="1"><c r="A1"><f>{formula}</f></c></row></sheetData></worksheet>',
+            output=tmp_path / f"three-dimensional-{index}.xlsx",
+            workbook=workbook,
+            extras=extras,
+        )
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        result = daytona_engine._scan_package(source, digest)
+        assert result["repair_plan"]["status"] == "refused"
+        assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
+
+
+def test_issue8_engine_refuses_duplicate_attributes_and_out_of_grid_cells(tmp_path: Path) -> None:
+    duplicate = _package(
+        '<worksheet a="1" a="2"><sheetData/></worksheet>',
+        output=tmp_path / "duplicate-attributes.xlsx",
+    )
+    duplicate_digest = hashlib.sha256(duplicate.read_bytes()).hexdigest()
+    duplicate_result = daytona_engine._scan_package(duplicate, duplicate_digest)
+    assert duplicate_result["status"] == "refused"
+    assert duplicate_result["refusal_code"] == "unsupported_content"
+
+    for index, reference in enumerate(("XFE1", "A1048577")):
+        source = _package(
+            f'<worksheet><sheetData><row r="1" hidden="1"><c r="{reference}"><v>secret</v></c></row></sheetData></worksheet>',
+            output=tmp_path / f"out-of-grid-{index}.xlsx",
+        )
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        result = daytona_engine._scan_package(source, digest)
+        assert result["repair_plan"]["status"] == "refused"
+        assert "without an exact cell reference" in " ".join(result["repair_plan"]["refusal_reasons"])
+
+
 def test_issue8_engine_refuses_malformed_workbook(tmp_path: Path) -> None:
     source = _package("<worksheet><sheetData/></worksheet>trailing", output=tmp_path / "malformed.xlsx")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()

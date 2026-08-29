@@ -1,6 +1,8 @@
 export const API_VERSION = "1" as const;
 export const ENGINE_VERSION = "1.0.0" as const;
 export const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+export const MAX_WORKSHEET_ROWS = 1_048_576;
+export const MAX_WORKSHEET_COLUMNS = 16_384;
 export const REVEAL_TTL_MS = 60 * 1000;
 export const REPAIR_APPROVAL_TTL_MS = 10 * 60 * 1000;
 

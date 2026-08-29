@@ -2,6 +2,8 @@ import { unzipSync } from "fflate";
 
 import {
   ENGINE_VERSION,
+  MAX_WORKSHEET_COLUMNS,
+  MAX_WORKSHEET_ROWS,
   type DependencyAnalysis,
   type EngineScanResult,
   type EngineVerifyResult,
@@ -168,8 +170,11 @@ function xmlWellFormed(xml: string): boolean {
     } else {
       const attributePattern = /\s+([A-Za-z_][\w.:-]*)\s*=\s*("[^"]*"|'[^']*')/g;
       let attributeCursor = 0;
+      const attributeNames = new Set<string>();
       for (const attribute of attributes.matchAll(attributePattern)) {
         if (attributes.slice(attributeCursor, attribute.index).trim().length > 0) return false;
+        if (attributeNames.has(attribute[1]!)) return false;
+        attributeNames.add(attribute[1]!);
         attributeCursor = (attribute.index ?? 0) + attribute[0].length;
       }
       if (attributes.slice(attributeCursor).trim().length > 0) return false;
@@ -205,7 +210,9 @@ function cellInfo(reference: string): CellInfo | undefined {
   if (!match) return undefined;
   const column = cellColumn(match[1]!);
   const row = Number(match[2]);
-  return Number.isSafeInteger(row) && column > 0 ? { reference: `${match[1]!.toUpperCase()}${row}`, column, row } : undefined;
+  return Number.isSafeInteger(row) && row <= MAX_WORKSHEET_ROWS && column > 0 && column <= MAX_WORKSHEET_COLUMNS
+    ? { reference: `${match[1]!.toUpperCase()}${row}`, column, row }
+    : undefined;
 }
 
 function hiddenDimensionRanges(xml: string): { rows: Set<number>; columns: Array<[number, number]> } {
@@ -307,12 +314,32 @@ function rowRangeContainsTargets(targets: readonly CellInfo[], start: string, en
   return targets.some((target) => target.row >= Math.min(minimum, maximum) && target.row <= Math.max(minimum, maximum));
 }
 
+function normalizedSheetName(name: string): string {
+  return name.replace(/''/g, "'").trim().toLowerCase();
+}
+
+function sheetInSpan(
+  sheet: SheetInfo,
+  first: string,
+  last: string,
+  sheetOrder: readonly SheetInfo[],
+): boolean {
+  const targetIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(sheet.name));
+  const firstIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(first));
+  const lastIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(last));
+  if (targetIndex >= 0 && firstIndex >= 0 && lastIndex >= 0) {
+    return targetIndex >= Math.min(firstIndex, lastIndex) && targetIndex <= Math.max(firstIndex, lastIndex);
+  }
+  return normalizedSheetName(first) === normalizedSheetName(sheet.name) || normalizedSheetName(last) === normalizedSheetName(sheet.name);
+}
+
 function referencesCells(
   text: string,
   sheet: SheetInfo,
   cells: readonly string[],
   currentSheetPath?: string,
   allowUnqualifiedWhenUnknownSheet = false,
+  sheetOrder: readonly SheetInfo[] = [],
 ): boolean {
   if (cells.length === 0) return false;
   const decoded = decodeXml(text);
@@ -331,15 +358,14 @@ function referencesCells(
   const quotedThreeDimensionalPattern = /'((?:[^']|'')+)'!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
   for (const match of decoded.matchAll(quotedThreeDimensionalPattern)) {
     const names = (match[1] ?? "").split(":");
-    if (!names.some((name) => name.replace(/''/g, "'").trim().toLowerCase() === sheet.name.toLowerCase())) continue;
+    if (names.length !== 2 || !sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder)) continue;
     const start = cellInfo(`${match[2]}${match[3]}`);
     const end = cellInfo(`${match[4] ?? match[2]}${match[5] ?? match[3]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
   }
   const threeDimensionalPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
   for (const match of decoded.matchAll(threeDimensionalPattern)) {
-    const names = [match[1], match[2]];
-    if (!names.some((name) => name?.trim().toLowerCase() === sheet.name.toLowerCase())) continue;
+    if (!sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder)) continue;
     const start = cellInfo(`${match[3]}${match[4]}`);
     const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
@@ -394,10 +420,27 @@ function matchingElementsForCells(
   cells: readonly string[],
   currentSheetPath?: string,
   allowUnqualifiedWhenUnknownSheet = false,
+  sheetOrder: readonly SheetInfo[] = [],
 ): boolean {
   const pattern = "<" + localElement(element) + "\\b[^>]*(?:/>|>[\\s\\S]*?</" + localElement(element) + ">)";
   for (const match of xml.matchAll(new RegExp(pattern, "gi"))) {
-    if (referencesCells(match[0] ?? "", sheet, cells, currentSheetPath, allowUnqualifiedWhenUnknownSheet)) return true;
+    const elementXml = match[0] ?? "";
+    if (element.toLowerCase() === "definedname") {
+      const attributes = elementXml.match(new RegExp("<" + localElement(element) + "\\b([^>]*)", "i"))?.[1] ?? "";
+      const localSheetId = xmlAttribute(attributes, "localSheetId");
+      if (localSheetId !== undefined) {
+        const index = Number(localSheetId);
+        if (!Number.isInteger(index) || index < 0 || !sheetOrder[index]) return true;
+        if (sheetOrder[index]!.path !== sheet.path) continue;
+        if (referencesCells(elementXml, sheet, cells, sheet.path, false, sheetOrder)) return true;
+      } else if (referencesCells(elementXml, sheet, cells, undefined, true, sheetOrder)) {
+        // Workbook-scoped relative names have no owning worksheet. Refuse
+        // conservatively whenever their coordinates could name a target.
+        return true;
+      }
+      continue;
+    }
+    if (referencesCells(elementXml, sheet, cells, currentSheetPath, allowUnqualifiedWhenUnknownSheet, sheetOrder)) return true;
   }
   return false;
 }
@@ -617,35 +660,35 @@ function buildPlan(
     for (const [member, bytes] of Object.entries(files)) {
       const xml = decoder.decode(bytes);
       const relatedToSheet = member === sheet.path || memberIsRelatedToWorksheet(member, sheet.path, relationships);
-      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "f", sheet, cells, member)) {
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "f", sheet, cells, member, false, sheets)) {
         dependencies.visible_formulas.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("visible formula in " + member);
       }
-      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells, undefined, true)) {
+      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells, undefined, false, sheets)) {
         dependencies.defined_names.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("defined name in xl/workbook.xml");
       }
-      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "dataValidation", sheet, cells, member)) {
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "dataValidation", sheet, cells, member, false, sheets)) {
         dependencies.data_validation.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("data validation in " + member);
       }
       if (member.startsWith("xl/tables/") && member.endsWith(".xml") &&
-        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
         dependencies.tables.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("table in " + member);
       }
       if ((member.startsWith("xl/charts/") || member.startsWith("xl/drawings/")) && member.endsWith(".xml") &&
-        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
         dependencies.charts.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("chart or drawing in " + member);
       }
       if (member.startsWith("xl/pivot") && member.endsWith(".xml") &&
-        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
         dependencies.pivots.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("pivot in " + member);

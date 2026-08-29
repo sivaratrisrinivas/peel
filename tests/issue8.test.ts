@@ -37,6 +37,32 @@ function concealedWorksheet(): string {
     "</sheetData></worksheet>";
 }
 
+function threeSheetWorkbook(formula: string): Uint8Array {
+  return workbook(
+    `<worksheet><sheetData><row r='1'><c r='A1'><f>${formula}</f></c></row></sheetData></worksheet>`,
+    {
+      "xl/workbook.xml": text.encode(
+        "<workbook><sheets>" +
+          "<sheet name='Sheet1' sheetId='1' r:id='rId1'/>" +
+          "<sheet name='Sheet2' sheetId='2' r:id='rId2'/>" +
+          "<sheet name='Sheet3' sheetId='3' r:id='rId3'/>" +
+          "</sheets></workbook>",
+      ),
+      "xl/_rels/workbook.xml.rels": text.encode(
+        "<Relationships>" +
+          "<Relationship Id='rId1' Target='worksheets/sheet1.xml'/>" +
+          "<Relationship Id='rId2' Target='worksheets/sheet2.xml'/>" +
+          "<Relationship Id='rId3' Target='worksheets/sheet3.xml'/>" +
+          "</Relationships>",
+      ),
+      "xl/worksheets/sheet2.xml": text.encode(
+        "<worksheet><sheetData><row r='2' hidden='1'><c r='A2'><v>secret</v></c></row></sheetData></worksheet>",
+      ),
+      "xl/worksheets/sheet3.xml": text.encode("<worksheet><sheetData/></worksheet>"),
+    },
+  );
+}
+
 function stageCommand(artifact: ArtifactReference, messageUid = randomUUID()) {
   return {
     version: "1" as const,
@@ -244,6 +270,51 @@ describe("Issue #8 dependency refusal", () => {
     expect(result.run?.state).toBe("refused");
   });
 
+  it.each(["SUM(Sheet1:Sheet3!A2)", "SUM('Sheet1:Sheet3'!A2)"])(
+    "refuses a concealed value in the middle of a 3-D formula range (%s)",
+    async (formula) => {
+      const base = setup(threeSheetWorkbook(formula));
+      const result = await scan(base.daemon, base.artifact);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("repair_refused");
+      expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain("xl/worksheets/sheet1.xml");
+    },
+  );
+
+  it("refuses duplicate XML attributes before producing a Repair Plan", async () => {
+    const base = setup(workbook("<worksheet a='1' a='2'><sheetData/></worksheet>"));
+    const result = await scan(base.daemon, base.artifact);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.run.state).toBe("refused");
+    expect(result.run.scan?.status).toBe("refused");
+  });
+
+  it.each(["XFE1", "A1048577"])("refuses an out-of-grid concealed cell reference (%s)", async (reference) => {
+    const base = setup(workbook(`<worksheet><sheetData><row r='1' hidden='1'><c r='${reference}'><v>secret</v></c></row></sheetData></worksheet>`));
+    const result = await scan(base.daemon, base.artifact);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("repair_refused");
+    expect(result.run?.repair_plan?.refusal_reasons?.join(" ")).toContain("without an exact cell reference");
+  });
+
+  it("scopes unqualified sheet-local names to their owning worksheet", async () => {
+    const bytes = threeSheetWorkbook("SUM(A1)");
+    const files = unzipSync(bytes);
+    files["xl/workbook.xml"] = text.encode(
+      "<workbook><definedNames><definedName name='OtherSheetName' localSheetId='0'>$A$2</definedName></definedNames><sheets>" +
+        "<sheet name='Sheet1' sheetId='1' r:id='rId1'/><sheet name='Sheet2' sheetId='2' r:id='rId2'/><sheet name='Sheet3' sheetId='3' r:id='rId3'/>" +
+        "</sheets></workbook>",
+    );
+    const base = setup(zipSync(files));
+    const result = await scan(base.daemon, base.artifact);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.run.repair_plan?.status).toBe("eligible");
+  });
+
   it("refuses malformed worksheet XML before producing a Repair Plan", async () => {
     const base = setup(workbook("<worksheet><sheetData/></worksheet>trailing"));
     const result = await scan(base.daemon, base.artifact);
@@ -265,7 +336,7 @@ describe("Issue #8 dependency refusal", () => {
       macros: [],
       external_connections: [],
     };
-    expect(() => parseEngineScanResult({
+    const resultWithReference = (reference: string) => parseEngineScanResult({
       version: "1",
       operation: "scan",
       status: "findings",
@@ -284,13 +355,16 @@ describe("Issue #8 dependency refusal", () => {
           kind: "clear_hidden_cell_values",
           worksheet: "Visible",
           target_member: "xl/worksheets/sheet1.xml",
-          cell_references: ["a2"],
+          cell_references: [reference],
           changed_members: ["xl/worksheets/sheet1.xml"],
           capability_losses: ["value is cleared"],
         }],
         changed_members: ["xl/worksheets/sheet1.xml"],
         capability_losses: ["value is cleared"],
       },
-    })).toThrow(/uppercase A1-style/);
+    });
+    for (const reference of ["a2", "XFE1", "A1048577"]) {
+      expect(() => resultWithReference(reference)).toThrow(/uppercase A1-style/);
+    }
   });
 });

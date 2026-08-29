@@ -1,6 +1,8 @@
 import {
   API_VERSION,
   MAX_ARTIFACT_BYTES,
+  MAX_WORKSHEET_COLUMNS,
+  MAX_WORKSHEET_ROWS,
   type ArtifactReference,
   type Command,
   type DisclosureBinding,
@@ -193,7 +195,14 @@ function parseStringArray(value: unknown, path: string, minimum = 0): string[] {
 
 function parseCellReferenceArray(value: unknown, path: string): string[] {
   const references = parseStringArray(value, path, 1);
-  if (references.some((reference) => !/^[A-Z]{1,3}[1-9][0-9]*$/.test(reference))) {
+  if (references.some((reference) => {
+    const match = reference.match(/^([A-Z]{1,3})([1-9][0-9]*)$/);
+    if (!match) return true;
+    let column = 0;
+    for (const character of match[1]!) column = column * 26 + character.charCodeAt(0) - 64;
+    const row = Number(match[2]);
+    return column > MAX_WORKSHEET_COLUMNS || !Number.isSafeInteger(row) || row > MAX_WORKSHEET_ROWS;
+  })) {
     throw new SchemaError(`${path} must contain uppercase A1-style cell references`);
   }
   return references;
