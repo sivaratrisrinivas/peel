@@ -112,18 +112,18 @@ suspicious hidden worksheets, missing context, scope mismatch, model failure,
 private Reveal expiry, and visible refusal. The default path keeps Reveal off,
 and a refused Run has no Repair or Disclosure path.
 
-Issue #7 is implemented as an optional Gmail/IMAP Mailbox Trigger. Its initial
-Qodo review summary is published on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459264401)
-for commit `0faa8bc`; no review findings were surfaced there. The WSL fake
-IMAP/public-boundary suite passes, while the owned-mailbox smoke command is
-fail-closed and still requires locally configured IMAP credentials before it
-can produce live evidence. The follow-up Qodo review on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770)
-identified and verified fixes for restart rematerialization, bounded bridge
-and socket timeouts, shutdown ordering, stale recency-window behavior, bounded
-UID scanning, mailbox-scoped cursors, repeated eligible-draft observation, and
-retry-safe fetch failures. The final update through implementation commit
-`af29db1` reports zero bugs, rule violations, or skill insights; no findings
-were dismissed or deferred.
+Issue #7 adds an optional Gmail/IMAP Mailbox Trigger. The WSL fake-IMAP and
+public-boundary tests pass. The live owned-mailbox check is still outstanding
+because this checkout has no IMAP credentials or owned recipient configured.
+The smoke command exits `2` in that state, as it should. Keep the issue open
+until the command runs successfully against an owned mailbox.
+
+Qodo's initial review is recorded on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459264401)
+for commit `0faa8bc`. Its follow-up review on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770)
+found and verified fixes for restart state, bridge and socket timeouts,
+shutdown ordering, UID scanning and cursor scope, repeated draft observation,
+and fetch retries. The final update through `d490716` reports zero bugs, rule
+violations, or skill insights. No findings were dismissed or deferred.
 
 Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
 TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with
