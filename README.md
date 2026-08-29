@@ -203,9 +203,10 @@ sandbox paths.
 Three optional routes remain cuts. Sensitive Reveal values stay metadata-only
 until a private transport and retention path is proven. LibreOffice-dependent
 reopen checks remain cut because no supported binary was available on the gate
-host. Pivot-fixture coverage remains cut because neither the repository nor the
-connected Drive account provided a trusted raw `.xlsx` fixture with the needed
-pivot-cache parts.
+host. The issue #8 focused suites include deterministic pivot dependency
+fixtures; a trusted raw `.xlsx` fixture with complete pivot-cache parts remains
+cut because neither the repository nor the connected Drive account provided
+one.
 
 ## Architecture
 

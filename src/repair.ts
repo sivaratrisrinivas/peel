@@ -242,24 +242,61 @@ function cellInRange(reference: CellInfo, start: CellInfo, end: CellInfo): boole
     reference.column >= Math.min(start.column, end.column) && reference.column <= Math.max(start.column, end.column);
 }
 
-function referencesCells(text: string, sheet: SheetInfo, cells: readonly string[], currentSheetPath?: string): boolean {
+function columnRangeContainsTargets(targets: readonly CellInfo[], start: string, end: string): boolean {
+  const minimum = cellColumn(start);
+  const maximum = cellColumn(end);
+  return targets.some((target) => target.column >= Math.min(minimum, maximum) && target.column <= Math.max(minimum, maximum));
+}
+
+function rowRangeContainsTargets(targets: readonly CellInfo[], start: string, end: string): boolean {
+  const minimum = Number(start);
+  const maximum = Number(end);
+  return targets.some((target) => target.row >= Math.min(minimum, maximum) && target.row <= Math.max(minimum, maximum));
+}
+
+function referencesCells(
+  text: string,
+  sheet: SheetInfo,
+  cells: readonly string[],
+  currentSheetPath?: string,
+  allowUnqualifiedWhenUnknownSheet = false,
+): boolean {
   if (cells.length === 0) return false;
   const decoded = decodeXml(text);
   const targets = cells.map(cellInfo).filter((cell): cell is CellInfo => cell !== undefined);
+  const sheetMatches = (match: RegExpMatchArray): boolean => {
+    const referencedSheet = match[1] !== undefined ? match[1]!.replace(/''/g, "'") : match[2];
+    return Boolean(referencedSheet && referencedSheet.trim().toLowerCase() === sheet.name.toLowerCase());
+  };
   const referencePattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
   for (const match of decoded.matchAll(referencePattern)) {
-    const referencedSheet = match[1] !== undefined ? match[1].replace(/''/g, "'") : match[2];
-    if (!referencedSheet || referencedSheet.trim().toLowerCase() !== sheet.name.toLowerCase()) continue;
+    if (!sheetMatches(match)) continue;
     const start = cellInfo(`${match[3]}${match[4]}`);
     const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
   }
-  if (currentSheetPath !== sheet.path) return false;
+  const qualifiedColumnPattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
+  for (const match of decoded.matchAll(qualifiedColumnPattern)) {
+    if (sheetMatches(match) && columnRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
+  }
+  const qualifiedRowPattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
+  for (const match of decoded.matchAll(qualifiedRowPattern)) {
+    if (sheetMatches(match) && rowRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
+  }
+  if (currentSheetPath !== sheet.path && !allowUnqualifiedWhenUnknownSheet) return false;
   const localPattern = /(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?(?![A-Za-z0-9_])/gi;
   for (const match of decoded.matchAll(localPattern)) {
     const start = cellInfo(`${match[1]}${match[2]}`);
     const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  const localColumnPattern = /(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3}):\$?([A-Z]{1,3})(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localColumnPattern)) {
+    if (columnRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+  }
+  const localRowPattern = /(?:^|[^A-Za-z0-9_])\$?([1-9][0-9]*):\$?([1-9][0-9]*)(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localRowPattern)) {
+    if (rowRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
   }
   return false;
 }
@@ -287,29 +324,41 @@ function matchingElementsForCells(
   sheet: SheetInfo,
   cells: readonly string[],
   currentSheetPath?: string,
+  allowUnqualifiedWhenUnknownSheet = false,
 ): boolean {
-  const pattern = "<" + localElement(element) + "\\b[^>]*>([\\s\\S]*?)</" + localElement(element) + ">";
+  const pattern = "<" + localElement(element) + "\\b[^>]*(?:/>|>[\\s\\S]*?</" + localElement(element) + ">)";
   for (const match of xml.matchAll(new RegExp(pattern, "gi"))) {
-    if (referencesCells(match[0] ?? "", sheet, cells, currentSheetPath)) return true;
+    if (referencesCells(match[0] ?? "", sheet, cells, currentSheetPath, allowUnqualifiedWhenUnknownSheet)) return true;
   }
   return false;
+}
+
+function relationshipPathToWorksheet(
+  member: string,
+  worksheet: string,
+  relationships: readonly { source: string; target: string; member: string }[],
+): string[] | undefined {
+  if (member === worksheet) return [];
+  let current = member;
+  const seen = new Set<string>();
+  const path: string[] = [];
+  while (!seen.has(current)) {
+    seen.add(current);
+    const relation = relationships.find((candidate) => candidate.target === current);
+    if (!relation) return undefined;
+    path.push(relation.member);
+    if (relation.source === worksheet) return path;
+    current = relation.source;
+  }
+  return undefined;
 }
 
 function memberIsRelatedToWorksheet(
   member: string,
   worksheet: string,
-  relationships: readonly { source: string; target: string }[],
+  relationships: readonly { source: string; target: string; member: string }[],
 ): boolean {
-  let current = member;
-  const seen = new Set<string>();
-  while (!seen.has(current)) {
-    seen.add(current);
-    const relation = relationships.find((candidate) => candidate.target === current);
-    if (!relation) return false;
-    if (relation.source === worksheet) return true;
-    current = relation.source;
-  }
-  return false;
+  return relationshipPathToWorksheet(member, worksheet, relationships) !== undefined;
 }
 
 function hasMacro(files: Record<string, Uint8Array>): boolean {
@@ -499,7 +548,7 @@ function buildPlan(
         dependentMembers.add(member);
         sheetDependencies.push("visible formula in " + member);
       }
-      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells)) {
+      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells, undefined, true)) {
         dependencies.defined_names.push(member);
         dependentMembers.add(member);
         sheetDependencies.push("defined name in xl/workbook.xml");
@@ -528,14 +577,11 @@ function buildPlan(
         sheetDependencies.push("pivot in " + member);
       }
     }
-    for (const relation of relationships) {
-      if (relation.source !== sheet.path) continue;
-      if (dependentMembers.has(relation.target) ||
-        (relation.type.toLowerCase().includes("table") && dependencies.tables.includes(relation.target)) ||
-        ((relation.type.toLowerCase().includes("chart") || relation.type.toLowerCase().includes("drawing")) && dependencies.charts.includes(relation.target)) ||
-        (relation.type.toLowerCase().includes("pivot") && dependencies.pivots.includes(relation.target))) {
-        dependencies.package_relationships.push(relation.member);
-        sheetDependencies.push("package relationship in " + relation.member);
+    for (const dependentMember of dependentMembers) {
+      const path = relationshipPathToWorksheet(dependentMember, sheet.path, relationships) ?? [];
+      for (const relationMember of path) {
+        dependencies.package_relationships.push(relationMember);
+        sheetDependencies.push("package relationship in " + relationMember);
       }
     }
     if (sheetDependencies.length > 0) {
@@ -751,6 +797,13 @@ function contentTypesValid(files: Record<string, Uint8Array>): boolean {
   return true;
 }
 
+function reopenSupportedPackage(files: Record<string, Uint8Array>): boolean {
+  if (!files["xl/workbook.xml"] || !files["xl/worksheets/sheet1.xml"]) return false;
+  return Object.entries(files).every(([name, bytes]) => (
+    !(name.endsWith(".xml") || name.endsWith(".rels")) || xmlWellFormed(decoder.decode(bytes))
+  ));
+}
+
 function changedMembers(original: Record<string, Uint8Array>, candidate: Record<string, Uint8Array>): string[] {
   return unique([
     ...Object.keys(original).filter((name) => !candidate[name] || sha256(original[name]!) !== sha256(candidate[name]!)),
@@ -771,7 +824,7 @@ export function verifyWorkbook(
     const remainingFindings = candidate.findings;
     const relationships = relationshipsValid(candidate.files);
     const contentTypes = contentTypesValid(candidate.files);
-    const reopened = candidate.profileAccepted && candidate.files["xl/workbook.xml"] && candidate.files["xl/worksheets/sheet1.xml"];
+    const reopened = candidate.profileAccepted && reopenSupportedPackage(candidate.files);
     const baselineUnchanged = visibleBaseline(original.files) === visibleBaseline(candidate.files);
     const actualChanges = changedMembers(original.files, candidate.files);
     const allowedChanges = new Set(plan?.changed_members ?? []);

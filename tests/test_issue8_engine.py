@@ -105,6 +105,13 @@ def test_issue8_engine_refuses_every_declared_dependency(tmp_path: Path) -> None
             {},
             "visible_formulas",
         ),
+        "formula_column_range": (
+            '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>1</v></c></row>'
+            '<row r="4"><c r="A4"><f>SUM(A:A)</f></c></row></sheetData></worksheet>',
+            None,
+            {},
+            "visible_formulas",
+        ),
         "name": (
             '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>1</v></c></row></sheetData></worksheet>',
             '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><definedNames><definedName name="Secret">Visible!A2</definedName></definedNames>'
@@ -112,9 +119,16 @@ def test_issue8_engine_refuses_every_declared_dependency(tmp_path: Path) -> None
             {},
             "defined_names",
         ),
+        "sheet_local_name": (
+            '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>1</v></c></row></sheetData></worksheet>',
+            '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><definedNames><definedName name="Secret" localSheetId="0">$A$2</definedName></definedNames>'
+            '<sheets><sheet name="Visible" sheetId="1" r:id="rId1"/></sheets></workbook>',
+            {},
+            "defined_names",
+        ),
         "validation": (
             '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>1</v></c></row></sheetData>'
-            '<dataValidations><dataValidation><formula1>A2</formula1></dataValidation></dataValidations></worksheet>',
+            '<dataValidations><dataValidation sqref="A2"/></dataValidations></worksheet>',
             None,
             {},
             "data_validation",

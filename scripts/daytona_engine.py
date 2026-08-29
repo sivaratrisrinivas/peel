@@ -204,11 +204,16 @@ def _cell_info(reference: str) -> tuple[str, int, int] | None:
     match = re.fullmatch(r"\$?([A-Z]{1,3})\$?([1-9][0-9]*)", reference, re.IGNORECASE)
     if not match:
         return None
-    column = 0
-    for character in match.group(1).upper():
-        column = column * 26 + ord(character) - 64
+    column = _column_number(match.group(1))
     row = int(match.group(2))
     return f"{match.group(1).upper()}{row}", column, row
+
+
+def _column_number(column: str) -> int:
+    result = 0
+    for character in column.upper():
+        result = result * 26 + ord(character) - 64
+    return result
 
 
 def _hidden_dimension_ranges(xml: str) -> tuple[set[int], list[tuple[int, int]]]:
@@ -263,24 +268,59 @@ def _cell_in_range(reference: tuple[str, int, int], start: tuple[str, int, int],
     )
 
 
-def _references_cells(text: str, sheet: dict[str, str], cells: list[str], current_sheet_path: str | None = None) -> bool:
+def _column_range_contains_targets(targets: list[tuple[str, int, int]], start: str, end: str) -> bool:
+    start_column = _column_number(start)
+    end_column = _column_number(end)
+    return any(min(start_column, end_column) <= target[1] <= max(start_column, end_column) for target in targets)
+
+
+def _row_range_contains_targets(targets: list[tuple[str, int, int]], start: str, end: str) -> bool:
+    start_row = int(start)
+    end_row = int(end)
+    return any(min(start_row, end_row) <= target[2] <= max(start_row, end_row) for target in targets)
+
+
+def _references_cells(
+    text: str,
+    sheet: dict[str, str],
+    cells: list[str],
+    current_sheet_path: str | None = None,
+    allow_unqualified_when_unknown_sheet: bool = False,
+) -> bool:
     targets = [cell for cell in (_cell_info(value) for value in cells) if cell is not None]
     if not targets:
         return False
     decoded = _decode_xml(text)
+    def sheet_matches(match: re.Match[str]) -> bool:
+        referenced_sheet = (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2) or "").strip()
+        return referenced_sheet.casefold() == sheet["name"].casefold()
+
     reference_pattern = re.compile(
         r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
         re.IGNORECASE,
     )
     for match in reference_pattern.finditer(decoded):
-        referenced_sheet = (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2) or "").strip()
-        if referenced_sheet.casefold() != sheet["name"].casefold():
+        if not sheet_matches(match):
             continue
         start = _cell_info(f"{match.group(3)}{match.group(4)}")
         end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
-    if current_sheet_path != sheet["path"]:
+    qualified_column_pattern = re.compile(
+        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
+        re.IGNORECASE,
+    )
+    for match in qualified_column_pattern.finditer(decoded):
+        if sheet_matches(match) and _column_range_contains_targets(targets, match.group(3), match.group(4)):
+            return True
+    qualified_row_pattern = re.compile(
+        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
+        re.IGNORECASE,
+    )
+    for match in qualified_row_pattern.finditer(decoded):
+        if sheet_matches(match) and _row_range_contains_targets(targets, match.group(3), match.group(4)):
+            return True
+    if current_sheet_path != sheet["path"] and not allow_unqualified_when_unknown_sheet:
         return False
     local_pattern = re.compile(
         r"(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?(?![A-Za-z0-9_])",
@@ -291,6 +331,20 @@ def _references_cells(text: str, sheet: dict[str, str], cells: list[str], curren
         end = _cell_info(f"{match.group(3) or match.group(1)}{match.group(4) or match.group(2)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
+    local_column_pattern = re.compile(
+        r"(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3}):\$?([A-Z]{1,3})(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    for match in local_column_pattern.finditer(decoded):
+        if _column_range_contains_targets(targets, match.group(1), match.group(2)):
+            return True
+    local_row_pattern = re.compile(
+        r"(?:^|[^A-Za-z0-9_])\$?([1-9][0-9]*):\$?([1-9][0-9]*)(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    for match in local_row_pattern.finditer(decoded):
+        if _row_range_contains_targets(targets, match.group(1), match.group(2)):
+            return True
     return False
 
 
@@ -300,25 +354,36 @@ def _matching_elements_for_cells(
     sheet: dict[str, str],
     cells: list[str],
     current_sheet_path: str | None = None,
+    allow_unqualified_when_unknown_sheet: bool = False,
 ) -> bool:
     return any(
-        _references_cells(match.group(0), sheet, cells, current_sheet_path)
-        for match in re.finditer(rf"<{_local_element(element)}\b[^>]*>[\s\S]*?</{_local_element(element)}>", xml, re.IGNORECASE)
+        _references_cells(match.group(0), sheet, cells, current_sheet_path, allow_unqualified_when_unknown_sheet)
+        for match in re.finditer(rf"<{_local_element(element)}\b[^>]*(?:/>|>[\s\S]*?</{_local_element(element)}>)", xml, re.IGNORECASE)
     )
 
 
-def _member_is_related_to_worksheet(member: str, worksheet: str, relationships: list[dict[str, str]]) -> bool:
+def _relationship_path_to_worksheet(
+    member: str, worksheet: str, relationships: list[dict[str, str]]
+) -> list[str] | None:
+    if member == worksheet:
+        return []
     current = member
     seen: set[str] = set()
+    path: list[str] = []
     while current not in seen:
         seen.add(current)
         relation = next((candidate for candidate in relationships if candidate["target"] == current), None)
         if relation is None:
-            return False
+            return None
+        path.append(relation["member"])
         if relation["source"] == worksheet:
-            return True
+            return path
         current = relation["source"]
-    return False
+    return None
+
+
+def _member_is_related_to_worksheet(member: str, worksheet: str, relationships: list[dict[str, str]]) -> bool:
+    return _relationship_path_to_worksheet(member, worksheet, relationships) is not None
 
 
 def _empty_dependency_analysis() -> dict[str, list[str]]:
@@ -511,7 +576,9 @@ def _build_repair_plan(
                 dependencies["visible_formulas"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("visible formula in " + member)
-            if member == "xl/workbook.xml" and _matching_elements_for_cells(xml, "definedName", sheet, cells):
+            if member == "xl/workbook.xml" and _matching_elements_for_cells(
+                xml, "definedName", sheet, cells, allow_unqualified_when_unknown_sheet=True
+            ):
                 dependencies["defined_names"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("defined name in xl/workbook.xml")
@@ -539,20 +606,10 @@ def _build_repair_plan(
                 dependencies["pivots"].append(member)
                 dependent_members.add(member)
                 sheet_reasons.append("pivot in " + member)
-        for relation in relationships:
-            if relation["source"] != sheet["path"]:
-                continue
-            if (
-                relation["target"] in dependent_members
-                or ("table" in relation["type"].lower() and relation["target"] in dependencies["tables"])
-                or (
-                    ("chart" in relation["type"].lower() or "drawing" in relation["type"].lower())
-                    and relation["target"] in dependencies["charts"]
-                )
-                or ("pivot" in relation["type"].lower() and relation["target"] in dependencies["pivots"])
-            ):
-                dependencies["package_relationships"].append(relation["member"])
-                sheet_reasons.append("package relationship in " + relation["member"])
+        for dependent_member in dependent_members:
+            for relation_member in _relationship_path_to_worksheet(dependent_member, sheet["path"], relationships) or []:
+                dependencies["package_relationships"].append(relation_member)
+                sheet_reasons.append("package relationship in " + relation_member)
         if sheet_reasons:
             reasons.append(
                 f"Concealed values in worksheet {sheet['name']} have dependencies: "
