@@ -113,10 +113,10 @@ private Reveal expiry, and visible refusal. The default path keeps Reveal off,
 and a refused Run has no Repair or Disclosure path.
 
 Issue #7 adds an optional Gmail/IMAP Mailbox Trigger. The WSL fake-IMAP and
-public-boundary tests pass. The live owned-mailbox check is still outstanding
-because this checkout has no IMAP credentials or owned recipient configured.
-The smoke command exits `2` in that state, as it should. Keep the issue open
-until the command runs successfully against an owned mailbox.
+public-boundary tests pass. The live owned-mailbox smoke also passed on
+2026-08-29 against the configured mailbox: the first poll started one Run and
+the second poll deduplicated that same Run. The smoke output contains only
+bounded metadata.
 
 Qodo's initial review is recorded on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459264401)
 for commit `0faa8bc`. Its follow-up review on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770)
