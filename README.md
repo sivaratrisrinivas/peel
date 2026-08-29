@@ -141,34 +141,33 @@ fixes landed in commit `61d5852`. The [final Qodo update](https://github.com/siv
 for the completed branch reports zero bugs, rule violations, requirement gaps,
 or skill insights. No findings were dismissed or deferred.
 
-## Issue #8 hidden-row and hidden-column value governance
+## Issue #8: hidden row and column values
 
-Issue #8 extends the supported profile with a deterministic Attack for values
-in hidden rows and columns. It reports Finding metadata for every concealed
-value regardless of business legitimacy. Optional Reveal follows the same
-privacy and Scope Assessment rules as the hidden-worksheet journey: it is
-disabled by default, local-only when explicitly enabled, short-lived, and never
-places values in public Run/MCP responses, SQLite, logs, or reports.
+Peel scans values in hidden rows and columns and reports them as Findings,
+even when the workbook may have a legitimate reason to hide them. Reveal uses
+the same privacy and Scope Assessment checks as hidden worksheets. It is off by
+default. When enabled, it stays local, expires after 60 seconds, and never puts
+values in Run/MCP responses, SQLite, logs, or reports.
 
-When dependencies permit clearing, one complete Repair Plan names each exact
-concealed cell reference and requires a fresh native Repair Approval bound to
-the Run, revision, original Artifact Reference, plan hash, and engine version.
-The dependency proof covers visible formulas, defined names, data validation,
-tables, charts, pivots, and package relationships. Any dependency produces a
-visible Refusal. The surgical transformation changes only the planned
-worksheet member, preserving hidden dimensions, formatting, the original
-Artifact Reference, and unrelated OOXML members. Verification reruns every
-enabled Attack and normalizes only the approved concealed values when proving
-visible workbook fidelity. Malformed or otherwise unprovable packages refuse
-before Repair.
+Peel can clear a concealed value only when it can prove that no supported
+workbook feature uses it. The Repair Plan lists each exact cell and requires a
+new native Repair Approval bound to the Run, revision, original Artifact
+Reference, plan hash, and engine version. The dependency check covers visible
+formulas, defined names, data validation, tables, charts, pivots, and package
+relationships. Any dependency causes a visible Refusal.
 
-The [Qodo review for PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
-was followed through implementation commit `10bf668`. Its final report is clean:
-zero bugs, rule violations, or skill insights. The review findings on shared
-strings, whole ranges, reference-less cells, malformed XML, runtime cell
-references, 3-D ranges, duplicate attributes, worksheet grid limits, and
-defined-name scope were fixed and covered by tests. No findings were dismissed
-or deferred.
+The Repair changes only the planned worksheet member. It keeps hidden
+dimensions, formatting, the original Artifact Reference, and unrelated OOXML
+members. Verification runs every enabled Attack, checks the visible workbook
+content, and reopens the candidate. Malformed or otherwise unprovable packages
+are refused before Repair.
+
+Qodo reviewed [PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
+through implementation commit `10bf668` and reported zero bugs, rule
+violations, and skill insights. The review found issues in shared-string
+handling, whole-range and 3-D references, missing cell references, malformed
+XML, runtime validation, duplicate attributes, grid bounds, and defined-name
+scope. The fixes are covered by tests. No findings were dismissed or deferred.
 
 ## Current status
 
