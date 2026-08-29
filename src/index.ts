@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { PeelDaemon } from "./daemon.js";
-import { DaytonaWorkbookEngine, InMemoryArtifactStore, SmtpDisclosureMailer } from "./adapters.js";
+import { DaytonaWorkbookEngine, FakeWorkbookEngine, InMemoryArtifactStore, SmtpDisclosureMailer } from "./adapters.js";
 import { createPeelHttpServer } from "./http.js";
 import { GmailImapMailbox, MailboxWatcher } from "./mailbox.js";
 
@@ -23,7 +23,9 @@ if (liveMode) {
 const daemon = new PeelDaemon({
   allowedRecipients: [recipient],
   artifactStore: artifacts,
-  engine: liveMode ? new DaytonaWorkbookEngine(artifacts) : undefined,
+  // The non-live process is a local demo/test path. It may scan, but approved
+  // Repair must execute through the fresh-sandbox Daytona adapter.
+  engine: liveMode ? new DaytonaWorkbookEngine(artifacts) : new FakeWorkbookEngine(artifacts, { repairEnabled: false }),
   disclosureMailer: liveMode ? new SmtpDisclosureMailer() : undefined,
   databasePath,
 });

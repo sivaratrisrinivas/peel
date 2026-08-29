@@ -89,12 +89,12 @@ The manual fallback remains available through `POST /v1/artifacts` followed by
 `POST /v1/commands` with a `stage` command. Its existing public-boundary tests
 continue to cover direct staging without the watcher.
 
-Issue #5 adds the first read-only concealed-data journey. The deterministic
+Issue #5 adds the concealed-data Attack and one-way Scope Assessment. The
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
-metadata, applies a one-way Scope Assessment, and ends the Run in visible
-`refused` state without exposing Repair or Disclosure. `mismatch`,
-`insufficient_context`, and model failure fail closed; `no_mismatch_found` is
-only an assessment result and never authorization. Without an explicitly
+metadata. `mismatch`, `insufficient_context`, and model failure fail closed;
+`no_mismatch_found` is only an assessment result and never authorization. An
+eligible Finding now enters the separate issue #6 Repair Approval boundary;
+unsupported or unproven Findings remain visible Refusals. Without an explicitly
 configured Scope Assessor, the daemon returns `insufficient_context` rather than
 silently treating a Finding as aligned.
 
@@ -105,12 +105,47 @@ Run-bound reference through the command response, and serves values only from
 `GET /v1/runs/<run-id>/reveals/<reference>`. Reveal values are not placed in
 TrueForge/MCP responses, SQLite, or persistent reports.
 
+## Issue #6 hidden-worksheet repair
+
+Issue #6 supports repairing an unreferenced `hidden` or `veryHidden` worksheet
+in an accepted OOXML package. The engine creates one complete Repair Plan with
+dependency analysis for visible formulas, defined names, data validation,
+tables, charts, pivots, package relationships, macros, and external
+connections. The plan also names every capability loss. Any dependency,
+unsupported package member, macro, external connection, additional concealed
+mechanism, or unresolved worksheet relationship produces a Refusal.
+
+The native MCP `apply_repair` tool is the only way to run a Repair. Its approval
+binds the Run, envelope revision, original artifact SHA-256, canonical Repair
+Plan SHA-256, and engine version. If approval expires, the run restarts or
+replays, or the revision changes, Peel leaves the original Artifact Reference
+unchanged. An approved plan runs in a fresh Daytona sandbox in live mode and
+produces a new candidate. Tests use a deterministic fake engine for the same
+contract.
+
+The transformer edits only the planned workbook, relationship, and worksheet
+relationship members. It also edits the content-types member when it must
+remove a worksheet-specific override. Untouched ZIP member payloads stay
+byte-for-byte identical. Verification reruns the hidden-worksheet Attack,
+validates relationships and content types, checks the visible-content baseline,
+and reopens the candidate with the available readers. Any remaining Finding,
+unexplained member change, parse failure, or reopen failure destroys the
+candidate and ends the Run in Refusal. This issue does not repair hidden rows or
+columns, pivot caches, macros, external connections, or unsupported OOXML
+extensions.
+
+The initial [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/13#pullrequestreview-5056601225)
+reported four High-severity and one Medium-severity correctness findings. The
+fixes landed in commit `61d5852`. The [final Qodo update](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460222193)
+for the completed branch reports zero bugs, rule violations, requirement gaps,
+or skill insights. No findings were dismissed or deferred.
+
 ## Current status
 
 Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
 suspicious hidden worksheets, missing context, scope mismatch, model failure,
-private Reveal expiry, and visible refusal. The default path keeps Reveal off,
-and a refused Run has no Repair or Disclosure path.
+private Reveal expiry, and the handoff into Repair Approval. The default path
+keeps Reveal off, and a refused Run has no Repair or Disclosure path.
 
 Issue #7 adds an optional Gmail/IMAP Mailbox Trigger. The WSL fake-IMAP and
 public-boundary tests pass. The live owned-mailbox smoke also passed on
@@ -170,7 +205,7 @@ The kernel exposes the same versioned command boundary to both HTTP and MCP:
 
 - `POST /v1/artifacts` registers a bounded `.xlsx` byte stream and returns an
   opaque Artifact Reference.
-- `POST /v1/commands` accepts `stage`, `scan`, `verify`,
+- `POST /v1/commands` accepts `stage`, `scan`, `apply_repair`, `verify`,
   `request_disclosure`, and `respond_disclosure` commands.
 - `GET /v1/runs/<run-id>` returns bounded Run metadata and evidence.
 - `POST /mcp` exposes the same commands through `initialize`, `tools/list`,
@@ -192,6 +227,8 @@ The safety rules are simple:
 
 - An Attack reports a Finding when its concealed-data mechanism is present.
 - A Repair creates a new artifact and needs separate Repair Approval.
+- A Repair Plan enumerates dependencies and declared capability losses before
+  any transformation is authorized.
 - Verification reruns the Attacks and checks the visible-content baseline.
 - Disclosure needs a separate approval bound to the exact artifact and recipient.
 - A denied Disclosure Attempt produces no SMTP activity.

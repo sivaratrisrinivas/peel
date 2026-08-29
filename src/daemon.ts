@@ -1,6 +1,7 @@
 import {
   API_VERSION,
   ENGINE_VERSION,
+  REPAIR_APPROVAL_TTL_MS,
   REVEAL_TTL_MS,
   type ApiResponse,
   type ArtifactReference,
@@ -9,6 +10,7 @@ import {
   type DisclosureBinding,
   type Envelope,
   type ErrorResponse,
+  type EngineRepairResult,
   type EngineScanResult,
   type EngineVerifyResult,
   type RevealReference,
@@ -17,6 +19,8 @@ import {
   type RunView,
   type ScopeAssessmentEvidence,
   type ScopeAssessor,
+  type RepairApprovalView,
+  type RepairPlan,
   type SuccessResponse,
   type TriggerIdentity,
 } from "./contracts.js";
@@ -28,10 +32,11 @@ import {
   SystemClock,
   UnavailableScopeAssessor,
 } from "./adapters.js";
-import { disclosureBinding, disclosureFingerprint, envelopeRevisionHash, newId, runKey, sha256, canonicalJson } from "./identity.js";
-import { RunStore, toScanEvidence, toVerificationEvidence, type StoredRun } from "./store.js";
+import { disclosureBinding, disclosureFingerprint, envelopeRevisionHash, newId, repairApprovalBinding, repairPlanHash, runKey, sha256, canonicalJson } from "./identity.js";
+import { RunStore, toRepairEvidence, toScanEvidence, toVerificationEvidence, type StoredRun } from "./store.js";
 import {
   parseCommand,
+  parseEngineRepairResult,
   parseEngineScanResult,
   parseEngineVerifyResult,
   parseScopeAssessmentResult,
@@ -107,9 +112,12 @@ function publicRun(run: StoredRun, reveals: readonly RevealReference[] = []): Ru
     state: run.state,
     envelope_revision_hash: run.envelope_revision_hash,
     artifact: run.artifact,
+    original_artifact: run.original_artifact,
   };
   if (run.scan) view.scan = toScanEvidence(run.scan);
   if (run.scope_assessment) view.scope_assessment = run.scope_assessment;
+  if (run.repair_plan) view.repair_plan = run.repair_plan;
+  if (run.repair) view.repair = toRepairEvidence(run.repair);
   if (reveals.length > 0) view.reveals = [...reveals];
   if (run.verification) view.verification = toVerificationEvidence(run.verification);
   if (run.delivery) view.delivery = run.delivery;
@@ -118,11 +126,12 @@ function publicRun(run: StoredRun, reveals: readonly RevealReference[] = []): Ru
 
 function success(
   run: StoredRun,
-  extra: Pick<SuccessResponse, "approval" | "deduplicated"> = {},
+  extra: Pick<SuccessResponse, "approval" | "repair_approval" | "deduplicated"> = {},
   reveals: readonly RevealReference[] = [],
 ): SuccessResponse {
   const response: SuccessResponse = { version: API_VERSION, ok: true, run: publicRun(run, reveals) };
   if (extra.approval) response.approval = extra.approval;
+  if (extra.repair_approval) response.repair_approval = extra.repair_approval;
   if (extra.deduplicated !== undefined) response.deduplicated = extra.deduplicated;
   return response;
 }
@@ -234,6 +243,8 @@ export class PeelDaemon {
         return this.stage(command);
       case "scan":
         return this.scan(command);
+      case "apply_repair":
+        return this.applyRepair(command);
       case "verify":
         return this.verify(command);
       case "request_disclosure":
@@ -265,11 +276,17 @@ export class PeelDaemon {
         throw new CommandFailure("run_already_disclosed");
       }
       if (current.envelope_revision_hash === revisionHash) {
-        this.store.restoreArtifact(current.run_id, current.revision, envelope.attachment, this.clock.now());
+        if (current.original_artifact.sha256 !== envelope.attachment.sha256) {
+          throw new CommandFailure("stale_identity");
+        }
+        if (current.artifact.sha256 === envelope.attachment.sha256) {
+          this.store.restoreArtifact(current.run_id, current.revision, envelope.attachment, this.clock.now());
+        }
+        const materializedArtifact = this.mustGetRun(current.run_id).artifact;
         this.envelopes.set(current.run_id, {
           runId: current.run_id,
           revision: current.revision,
-          envelope,
+          envelope: { ...envelope, attachment: materializedArtifact },
         });
         return success(this.mustGetRun(current.run_id), { deduplicated: true });
       }
@@ -283,6 +300,7 @@ export class PeelDaemon {
         recipient: envelope.recipient,
         subject: envelope.subject,
         artifact: envelope.attachment,
+        original_artifact: envelope.attachment,
       };
       if (!this.store.reviseRun(current.run_id, revised, this.clock.now())) {
         throw new CommandFailure("active_run_exists");
@@ -303,6 +321,7 @@ export class PeelDaemon {
       recipient: envelope.recipient,
       subject: envelope.subject,
       artifact: envelope.attachment,
+      original_artifact: envelope.attachment,
     };
     if (!this.store.createRun(run, this.clock.now())) {
       throw new CommandFailure("active_run_exists");
@@ -316,7 +335,7 @@ export class PeelDaemon {
     try {
       this.artifactStore.read(run.artifact);
     } catch (error) {
-      this.store.setState(run.run_id, "refused", this.clock.now());
+      this.discardCandidate(run);
       return this.error(artifactFailureCode(error), this.mustGetRun(run.run_id));
     }
     let result: EngineScanResult;
@@ -357,17 +376,56 @@ export class PeelDaemon {
       }
     }
 
-    this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
-    const refusedRun = this.mustGetRun(run.run_id);
-    this.prepareReveals(refusedRun, result.findings);
-    const publicRefusedRun = this.mustGetRun(run.run_id);
     if (scopeAssessment.status === "mismatch") {
-      return this.error("scope_mismatch", publicRefusedRun);
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("scope_mismatch", this.mustGetRun(run.run_id));
     }
     if (scopeAssessment.status === "insufficient_context") {
-      return this.error("scope_insufficient_context", publicRefusedRun);
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("scope_insufficient_context", this.mustGetRun(run.run_id));
     }
-    return success(publicRefusedRun, {}, this.revealReferencesForRun(publicRefusedRun));
+    const plan = result.repair_plan;
+    if (!plan) {
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("repair_plan_unavailable", this.mustGetRun(run.run_id));
+    }
+    if (plan.artifact_sha256 !== run.artifact.sha256) {
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("repair_plan_identity_mismatch", this.mustGetRun(run.run_id));
+    }
+    if (plan.engine_version !== result.engine_version) {
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("repair_plan_identity_mismatch", this.mustGetRun(run.run_id));
+    }
+    const refusedPlan = plan.status === "refused";
+    if (refusedPlan) {
+      this.store.setState(run.run_id, "refused", this.clock.now(), result, undefined, undefined, scopeAssessment);
+      return this.error("repair_refused", this.mustGetRun(run.run_id));
+    }
+    const approvalId = newId();
+    const idempotencyKey = newId();
+    const binding = repairApprovalBinding(run.run_id, run.revision, run.artifact.sha256, plan);
+    const expiresAt = this.clock.now() + REPAIR_APPROVAL_TTL_MS;
+    this.store.createAuthorization(
+      approvalId,
+      run.run_id,
+      run.revision,
+      idempotencyKey,
+      expiresAt,
+      JSON.stringify(binding),
+      this.clock.now(),
+      "repair",
+    );
+    this.store.setState(run.run_id, "awaiting_repair_approval", this.clock.now(), result, undefined, undefined, scopeAssessment);
+    const approval: RepairApprovalView = {
+      approval_id: approvalId,
+      expires_at: isoTime(expiresAt),
+      idempotency_key: idempotencyKey,
+      binding,
+    };
+    const awaiting = this.mustGetRun(run.run_id);
+    this.prepareReveals(awaiting, result.findings);
+    return success(this.mustGetRun(run.run_id), { repair_approval: approval }, this.revealReferencesForRun(awaiting));
   }
 
   private verify(command: Extract<Command, { command: "verify" }>): ApiResponse {
@@ -375,22 +433,103 @@ export class PeelDaemon {
     try {
       this.artifactStore.read(run.artifact);
     } catch (error) {
-      this.store.setState(run.run_id, "refused", this.clock.now());
+      this.discardCandidate(run);
       return this.error(artifactFailureCode(error), this.mustGetRun(run.run_id));
     }
     let result: EngineVerifyResult;
     try {
-      result = parseEngineVerifyResult(this.engine.verify(run.artifact, run.artifact.sha256));
+      result = parseEngineVerifyResult(this.engine.verify(run.artifact, run.original_artifact.sha256, run.repair_plan, run.original_artifact));
     } catch (error) {
-      this.store.setState(run.run_id, "refused", this.clock.now());
+      this.discardCandidate(run);
       return this.error(error instanceof SchemaError ? "invalid_engine_result" : "engine_failed", this.mustGetRun(run.run_id));
     }
-    if (result.artifact_sha256 !== run.artifact.sha256 || result.original_artifact_sha256 !== run.artifact.sha256) {
-      this.store.setState(run.run_id, "refused", this.clock.now(), run.scan, result);
+    if (result.artifact_sha256 !== run.artifact.sha256 || result.original_artifact_sha256 !== run.original_artifact.sha256) {
+      this.discardCandidate(run);
       return this.error("artifact_identity_mismatch", this.mustGetRun(run.run_id));
     }
+    if (
+      run.repair_plan &&
+      (result.relationships_valid !== true || result.content_types_valid !== true ||
+        !result.reopened_with || result.reopened_with.length === 0 ||
+        result.artifact_unchanged !== true ||
+        result.remaining_findings.length > 0 ||
+        result.changed_members === undefined ||
+        canonicalJson(result.changed_members) !== canonicalJson(run.repair_plan.changed_members) ||
+        result.unexplained_changes === undefined || result.unexplained_changes.length > 0)
+    ) {
+      this.discardCandidate(run, result);
+      return this.error("verification_failed", this.mustGetRun(run.run_id));
+    }
     const nextState: RunState = result.status === "verified" ? "verified" : "refused";
+    if (nextState === "refused") {
+      this.discardCandidate(run, result);
+      return this.error("verification_failed", this.mustGetRun(run.run_id));
+    }
     this.store.setState(run.run_id, nextState, this.clock.now(), run.scan, result);
+    return success(this.mustGetRun(run.run_id));
+  }
+
+  private applyRepair(command: Extract<Command, { command: "apply_repair" }>): ApiResponse {
+    const run = this.authorizedRun(command.run_id, command.revision, command.artifact_sha256, "awaiting_repair_approval");
+    const plan = run.repair_plan;
+    if (!plan || plan.status !== "eligible") throw new CommandFailure("repair_plan_unavailable");
+    const authorization = this.store.getAuthorization(command.approval_id);
+    if (!authorization) throw new CommandFailure("repair_authorization_not_found");
+    if (
+      authorization.kind !== "repair" ||
+      authorization.run_id !== run.run_id ||
+      authorization.revision !== run.revision ||
+      authorization.idempotency_key !== command.idempotency_key ||
+      canonicalJson(JSON.parse(authorization.binding_json)) !== canonicalJson(command.binding)
+    ) {
+      throw new CommandFailure("repair_authorization_binding_mismatch");
+    }
+    const expectedBinding = repairApprovalBinding(run.run_id, run.revision, run.original_artifact.sha256, plan);
+    if (canonicalJson(expectedBinding) !== canonicalJson(command.binding)) throw new CommandFailure("stale_identity");
+    if (authorization.status !== "pending") throw new CommandFailure("repair_authorization_not_pending");
+    if (this.clock.now() >= authorization.expires_at) {
+      this.store.setAuthorizationStatus(authorization.approval_id, "expired");
+      this.store.setState(run.run_id, "refused", this.clock.now());
+      return this.error("repair_authorization_expired", this.mustGetRun(run.run_id));
+    }
+    this.store.setAuthorizationStatus(authorization.approval_id, "consumed");
+    this.store.setState(run.run_id, "repairing", this.clock.now());
+    let result: EngineRepairResult;
+    try {
+      if (!this.engine.repair) throw new Error("repair is unavailable");
+      result = parseEngineRepairResult(this.engine.repair(run.original_artifact, plan));
+    } catch {
+      this.store.restoreOriginalAndRefuse(run.run_id, undefined, this.clock.now());
+      return this.error("repair_failed", this.mustGetRun(run.run_id));
+    }
+    const candidate = result.candidate_artifact;
+    const changedMembersMatch = canonicalJson(result.changed_members) === canonicalJson(plan.changed_members);
+    if (
+      result.status !== "repaired" ||
+      !candidate ||
+      result.original_artifact_sha256 !== run.original_artifact.sha256 ||
+      result.repair_plan_sha256 !== repairPlanHash(plan) ||
+      result.engine_version !== plan.engine_version ||
+      result.artifact_sha256 !== candidate.sha256 ||
+      candidate.sha256 === run.original_artifact.sha256 ||
+      !changedMembersMatch
+    ) {
+      this.discardArtifact(candidate, run.original_artifact);
+      this.store.restoreOriginalAndRefuse(run.run_id, undefined, this.clock.now());
+      return this.error("repair_failed", this.mustGetRun(run.run_id));
+    }
+    try {
+      this.artifactStore.read(candidate);
+    } catch {
+      this.discardArtifact(candidate, run.original_artifact);
+      this.store.restoreOriginalAndRefuse(run.run_id, undefined, this.clock.now());
+      return this.error("repair_failed", this.mustGetRun(run.run_id));
+    }
+    this.store.setRepairCandidate(run.run_id, candidate, plan, result, this.clock.now());
+    const heldEnvelope = this.envelopes.get(run.run_id);
+    if (heldEnvelope && heldEnvelope.revision === run.revision) {
+      this.envelopes.set(run.run_id, { ...heldEnvelope, envelope: { ...heldEnvelope.envelope, attachment: candidate } });
+    }
     return success(this.mustGetRun(run.run_id));
   }
 
@@ -535,6 +674,16 @@ export class PeelDaemon {
     const run = this.store.getRun(runId);
     if (!run) throw new Error("run disappeared");
     return run;
+  }
+
+  private discardCandidate(run: StoredRun, verification?: EngineVerifyResult): void {
+    this.discardArtifact(run.artifact, run.original_artifact);
+    this.store.restoreOriginalAndRefuse(run.run_id, verification, this.clock.now());
+  }
+
+  private discardArtifact(candidate: ArtifactReference | undefined, original: ArtifactReference): void {
+    if (!candidate || candidate.reference === original.reference) return;
+    this.artifactStore.discard?.(candidate);
   }
 
   private error(code: string, run?: StoredRun): ErrorResponse {
@@ -693,6 +842,10 @@ function publicErrorMessage(code: string): string {
     authorization_binding_mismatch: "The Disclosure Approval is not bound to this exact envelope and artifact.",
     authorization_not_pending: "The Disclosure Approval is no longer pending.",
     authorization_expired: "The Disclosure Approval expired before the decision.",
+    repair_authorization_not_found: "The Repair Approval does not exist.",
+    repair_authorization_binding_mismatch: "The Repair Approval is not bound to this exact Run, artifact, and Repair Plan.",
+    repair_authorization_not_pending: "The Repair Approval is no longer pending.",
+    repair_authorization_expired: "The Repair Approval expired before Repair began.",
     duplicate_disclosure: "This Disclosure Fingerprint was already accepted.",
     disclosure_rejected: "The Disclosure was rejected before acceptance.",
     delivery_unknown: "SMTP acceptance is ambiguous; no automatic retry was performed.",
@@ -703,6 +856,11 @@ function publicErrorMessage(code: string): string {
     scope_mismatch: "The Claimed Scope does not match the bounded Finding evidence; the Run was refused.",
     scope_insufficient_context: "The Claimed Scope could not be assessed with sufficient context; the Run was refused.",
     scope_assessment_failed: "Scope Assessment could not be completed; the Run was refused.",
+    repair_plan_unavailable: "The workbook did not produce a complete eligible Repair Plan.",
+    repair_plan_identity_mismatch: "The Repair Plan is not bound to the staged artifact.",
+    repair_refused: "A dependency or unsupported capability prevents a safe Repair.",
+    repair_failed: "The Repair could not be completed atomically; the candidate was destroyed.",
+    verification_failed: "The repaired artifact failed supported-profile Verification and was destroyed.",
     command_failed: "The command could not be completed safely.",
   };
   return messages[code] ?? "The command was refused safely.";

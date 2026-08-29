@@ -4,8 +4,11 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import type {
   ArtifactReference,
   DeliveryEvidence,
+  EngineRepairResult,
   EngineScanResult,
   EngineVerifyResult,
+  RepairEvidence,
+  RepairPlan,
   RunState,
   ScanEvidence,
   ScopeAssessmentEvidence,
@@ -27,8 +30,11 @@ export interface StoredRun {
   recipient: string;
   subject: string;
   artifact: ArtifactReference;
+  original_artifact: ArtifactReference;
   scan?: EngineScanResult;
   scope_assessment?: ScopeAssessmentEvidence;
+  repair_plan?: RepairPlan;
+  repair?: EngineRepairResult;
   verification?: EngineVerifyResult;
   delivery?: DeliveryEvidence;
 }
@@ -41,6 +47,7 @@ export interface StoredAuthorization {
   expires_at: number;
   status: "pending" | "consumed" | "denied" | "expired" | "invalidated";
   binding_json: string;
+  kind: "repair" | "disclosure";
 }
 
 export interface StoredCommand {
@@ -95,8 +102,11 @@ export class RunStore {
         recipient TEXT NOT NULL,
         subject TEXT NOT NULL,
         artifact_json TEXT NOT NULL,
+        original_artifact_json TEXT NOT NULL,
         scan_json TEXT,
         scope_assessment_json TEXT,
+        repair_plan_json TEXT,
+        repair_json TEXT,
         verification_json TEXT,
         delivery_json TEXT,
         created_at INTEGER NOT NULL,
@@ -125,6 +135,7 @@ export class RunStore {
         run_id TEXT NOT NULL REFERENCES runs(run_id),
         revision INTEGER NOT NULL,
         idempotency_key TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL DEFAULT 'disclosure',
         expires_at INTEGER NOT NULL,
         status TEXT NOT NULL,
         binding_json TEXT NOT NULL,
@@ -146,6 +157,20 @@ export class RunStore {
     if (!columns.some((column) => column.name === "scope_assessment_json")) {
       this.database.exec("ALTER TABLE runs ADD COLUMN scope_assessment_json TEXT");
     }
+    if (!columns.some((column) => column.name === "original_artifact_json")) {
+      this.database.exec("ALTER TABLE runs ADD COLUMN original_artifact_json TEXT");
+      this.database.exec("UPDATE runs SET original_artifact_json = artifact_json WHERE original_artifact_json IS NULL");
+    }
+    if (!columns.some((column) => column.name === "repair_plan_json")) {
+      this.database.exec("ALTER TABLE runs ADD COLUMN repair_plan_json TEXT");
+    }
+    if (!columns.some((column) => column.name === "repair_json")) {
+      this.database.exec("ALTER TABLE runs ADD COLUMN repair_json TEXT");
+    }
+    const authorizationColumns = this.database.prepare("PRAGMA table_info(authorizations)").all() as Array<Record<string, unknown>>;
+    if (!authorizationColumns.some((column) => column.name === "kind")) {
+      this.database.exec("ALTER TABLE authorizations ADD COLUMN kind TEXT NOT NULL DEFAULT 'disclosure'");
+    }
   }
 
   recoverAfterRestart(now: number): void {
@@ -158,6 +183,12 @@ export class RunStore {
         UPDATE runs SET state = 'verified', updated_at = ?
         WHERE state = 'awaiting_disclosure_approval'
       `).run(now);
+      this.database.prepare(
+        "UPDATE runs SET state = 'refused', updated_at = ? WHERE state = 'awaiting_repair_approval'",
+      ).run(now);
+      this.database.prepare(
+        "UPDATE runs SET state = 'refused', artifact_json = original_artifact_json, repair_json = NULL, updated_at = ? WHERE state = 'repairing'",
+      ).run(now);
       this.database.prepare(
         "UPDATE runs SET state = 'failed', updated_at = ? WHERE state = 'disclosing'",
       ).run(now);
@@ -208,8 +239,8 @@ export class RunStore {
       this.database.prepare(`
         INSERT INTO runs (
           run_id, run_key, revision, state, envelope_revision_hash, body_sha256,
-          sender, recipient, subject, artifact_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sender, recipient, subject, artifact_json, original_artifact_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         run.run_id,
         run.run_key,
@@ -221,6 +252,7 @@ export class RunStore {
         run.recipient,
         run.subject,
         JSON.stringify(run.artifact),
+        JSON.stringify(run.original_artifact),
         now,
         now,
       );
@@ -265,9 +297,12 @@ export class RunStore {
       ) {
         throw new Error("artifact restoration identity mismatch");
       }
+      const originalArtifact = run.original_artifact.sha256 === run.artifact.sha256
+        ? artifact
+        : run.original_artifact;
       this.database.prepare(
-        "UPDATE runs SET artifact_json = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
-      ).run(JSON.stringify(artifact), now, runId, revision);
+        "UPDATE runs SET artifact_json = ?, original_artifact_json = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+      ).run(JSON.stringify(artifact), JSON.stringify(originalArtifact), now, runId, revision);
       this.database.prepare(
         "UPDATE envelope_revisions SET attachment_json = ? WHERE run_id = ? AND revision = ?",
       ).run(JSON.stringify(artifact), runId, revision);
@@ -291,8 +326,8 @@ export class RunStore {
       }
       this.database.prepare(`
         UPDATE runs SET revision = ?, state = ?, envelope_revision_hash = ?, body_sha256 = ?,
-          sender = ?, recipient = ?, subject = ?, artifact_json = ?, scan_json = NULL,
-          scope_assessment_json = NULL,
+          sender = ?, recipient = ?, subject = ?, artifact_json = ?, original_artifact_json = ?, scan_json = NULL,
+          scope_assessment_json = NULL, repair_plan_json = NULL, repair_json = NULL,
           verification_json = NULL, delivery_json = NULL, updated_at = ? WHERE run_id = ?
       `).run(
         run.revision,
@@ -303,6 +338,7 @@ export class RunStore {
         run.recipient,
         run.subject,
         JSON.stringify(run.artifact),
+        JSON.stringify(run.original_artifact),
         now,
         runId,
       );
@@ -330,7 +366,7 @@ export class RunStore {
     const current = this.getRun(runId);
     if (!current) throw new Error("run not found");
     this.database.prepare(`
-      UPDATE runs SET state = ?, scan_json = ?, scope_assessment_json = ?, verification_json = ?, delivery_json = ?, updated_at = ?
+      UPDATE runs SET state = ?, scan_json = ?, scope_assessment_json = ?, repair_plan_json = ?, verification_json = ?, delivery_json = ?, updated_at = ?
       WHERE run_id = ?
     `).run(
       state,
@@ -340,8 +376,40 @@ export class RunStore {
         : current.scope_assessment
           ? JSON.stringify(current.scope_assessment)
           : null,
+      scan?.repair_plan
+        ? JSON.stringify(scan.repair_plan)
+        : current.repair_plan
+          ? JSON.stringify(current.repair_plan)
+          : null,
       verification ? JSON.stringify(verification) : current.verification ? JSON.stringify(current.verification) : null,
       delivery ? JSON.stringify(delivery) : current.delivery ? JSON.stringify(current.delivery) : null,
+      now,
+      runId,
+    );
+  }
+
+  setRepairCandidate(
+    runId: string,
+    candidate: ArtifactReference,
+    plan: RepairPlan,
+    repair: EngineRepairResult,
+    now: number,
+  ): void {
+    this.database.prepare(`
+      UPDATE runs SET artifact_json = ?, repair_plan_json = ?, repair_json = ?, state = 'scanned', updated_at = ?
+      WHERE run_id = ?
+    `).run(JSON.stringify(candidate), JSON.stringify(plan), JSON.stringify(repair), now, runId);
+  }
+
+  restoreOriginalAndRefuse(runId: string, verification: EngineVerifyResult | undefined, now: number): void {
+    const current = this.getRun(runId);
+    if (!current) throw new Error("run not found");
+    this.database.prepare(`
+      UPDATE runs SET artifact_json = ?, repair_json = NULL, verification_json = ?, state = 'refused', updated_at = ?
+      WHERE run_id = ?
+    `).run(
+      JSON.stringify(current.original_artifact),
+      verification ? JSON.stringify(verification) : current.verification ? JSON.stringify(current.verification) : null,
       now,
       runId,
     );
@@ -372,12 +440,13 @@ export class RunStore {
     expiresAt: number,
     bindingJson: string,
     now: number,
+    kind: StoredAuthorization["kind"] = "disclosure",
   ): void {
     this.database.prepare(`
       INSERT INTO authorizations (
-        approval_id, run_id, revision, idempotency_key, expires_at, status, binding_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-    `).run(approvalId, runId, revision, idempotencyKey, expiresAt, bindingJson, now);
+        approval_id, run_id, revision, idempotency_key, kind, expires_at, status, binding_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(approvalId, runId, revision, idempotencyKey, kind, expiresAt, bindingJson, now);
   }
 
   getAuthorization(approvalId: string): StoredAuthorization | undefined {
@@ -392,6 +461,25 @@ export class RunStore {
       expires_at: integerField(record, "expires_at"),
       status: requiredString(record, "status") as StoredAuthorization["status"],
       binding_json: requiredString(record, "binding_json"),
+      kind: requiredString(record, "kind") as StoredAuthorization["kind"],
+    };
+  }
+
+  getPendingAuthorization(runId: string, kind: StoredAuthorization["kind"]): StoredAuthorization | undefined {
+    const row = this.database.prepare(
+      "SELECT * FROM authorizations WHERE run_id = ? AND kind = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+    ).get(runId, kind);
+    if (!row) return undefined;
+    const record = row as Record<string, unknown>;
+    return {
+      approval_id: requiredString(record, "approval_id"),
+      run_id: requiredString(record, "run_id"),
+      revision: integerField(record, "revision"),
+      idempotency_key: requiredString(record, "idempotency_key"),
+      expires_at: integerField(record, "expires_at"),
+      status: requiredString(record, "status") as StoredAuthorization["status"],
+      binding_json: requiredString(record, "binding_json"),
+      kind: requiredString(record, "kind") as StoredAuthorization["kind"],
     };
   }
 
@@ -438,8 +526,11 @@ export class RunStore {
       recipient: requiredString(record, "recipient"),
       subject: requiredString(record, "subject"),
       artifact: JSON.parse(artifactJson) as ArtifactReference,
+      original_artifact: JSON.parse(requiredString(record, "original_artifact_json")) as ArtifactReference,
       scan: optionalJson<EngineScanResult>(record, "scan_json"),
       scope_assessment: optionalJson<ScopeAssessmentEvidence>(record, "scope_assessment_json"),
+      repair_plan: optionalJson<RepairPlan>(record, "repair_plan_json"),
+      repair: optionalJson<EngineRepairResult>(record, "repair_json"),
       verification: optionalJson<EngineVerifyResult>(record, "verification_json"),
       delivery: optionalJson<DeliveryEvidence>(record, "delivery_json"),
     };
@@ -479,4 +570,14 @@ export function toVerificationEvidence(verification: EngineVerifyResult): Verifi
   };
   if (verification.refusal_code) evidence.refusal_code = verification.refusal_code;
   return evidence;
+}
+
+export function toRepairEvidence(repair: EngineRepairResult): RepairEvidence {
+  return {
+    original_artifact_sha256: repair.original_artifact_sha256,
+    artifact_sha256: repair.artifact_sha256,
+    repair_plan_sha256: repair.repair_plan_sha256,
+    engine_version: repair.engine_version,
+    changed_members: repair.changed_members,
+  };
 }

@@ -4,10 +4,23 @@
   "title": "Peel engine manifest",
   "oneOf": [
     { "$ref": "#/$defs/scan" },
+    { "$ref": "#/$defs/repair" },
     { "$ref": "#/$defs/verify" }
   ],
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "filename", "media_type", "byte_size", "sha256"],
+      "properties": {
+        "reference": { "type": "string", "minLength": 1 },
+        "filename": { "type": "string", "minLength": 1 },
+        "media_type": { "const": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+        "byte_size": { "type": "integer", "minimum": 0, "maximum": 10485760 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "finding": {
       "type": "object",
       "additionalProperties": false,
@@ -17,6 +30,69 @@
         "location": { "type": "string", "minLength": 1 },
         "count": { "type": "integer", "minimum": 1 }
       }
+    },
+    "dependencyAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["visible_formulas", "defined_names", "data_validation", "tables", "charts", "pivots", "package_relationships", "macros", "external_connections"],
+      "properties": {
+        "visible_formulas": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "defined_names": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "data_validation": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "tables": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "charts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "pivots": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "package_relationships": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "macros": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "external_connections": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "repairAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "worksheet", "target_member", "changed_members", "capability_losses"],
+      "properties": {
+        "kind": { "const": "delete_hidden_worksheet" },
+        "worksheet": { "type": "string", "minLength": 1 },
+        "target_member": { "type": "string", "minLength": 1 },
+        "changed_members": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "capability_losses": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "repairPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "operation", "status", "artifact_sha256", "engine_version", "dependency_analysis", "actions", "changed_members", "capability_losses"],
+      "properties": {
+        "version": { "const": "1" },
+        "operation": { "const": "repair_plan" },
+        "status": { "enum": ["eligible", "refused"] },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "dependency_analysis": { "$ref": "#/$defs/dependencyAnalysis" },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/repairAction" } },
+        "changed_members": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "capability_losses": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "refusal_reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "eligible" } } },
+          "then": {
+            "properties": {
+              "actions": { "minItems": 1 },
+              "changed_members": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "refused" } } },
+          "then": {
+            "required": ["refusal_reasons"],
+            "properties": { "actions": { "maxItems": 0 } }
+          }
+        }
+      ]
     },
     "scan": {
       "type": "object",
@@ -30,8 +106,36 @@
         "engine_version": { "type": "string", "minLength": 1 },
         "supported_profile": { "enum": ["accepted", "refused"] },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "repair_plan": { "$ref": "#/$defs/repairPlan" },
         "refusal_code": { "enum": ["unsupported_container", "unsupported_content", "integrity_failure"] }
       }
+    },
+    "repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "operation", "status", "artifact_sha256", "original_artifact_sha256", "engine_version", "repair_plan_sha256", "changed_members"],
+      "properties": {
+        "version": { "const": "1" },
+        "operation": { "const": "repair" },
+        "status": { "enum": ["repaired", "refused"] },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "original_artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "engine_version": { "type": "string", "minLength": 1 },
+        "repair_plan_sha256": { "$ref": "#/$defs/sha256" },
+        "changed_members": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "candidate_artifact": { "$ref": "#/$defs/artifact" },
+        "refusal_code": { "enum": ["unsupported_container", "unsupported_content", "integrity_failure"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "repaired" } } },
+          "then": { "required": ["candidate_artifact"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "refused" } } },
+          "then": { "not": { "required": ["candidate_artifact"] } }
+        }
+      ]
     },
     "verify": {
       "type": "object",
@@ -47,6 +151,11 @@
         "artifact_unchanged": { "type": "boolean" },
         "baseline_sha256": { "$ref": "#/$defs/sha256" },
         "remaining_findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "relationships_valid": { "type": "boolean" },
+        "content_types_valid": { "type": "boolean" },
+        "reopened_with": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "changed_members": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "unexplained_changes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "refusal_code": { "enum": ["unsupported_container", "unsupported_content", "integrity_failure"] }
       }
     }

@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   DisclosureBinding,
   Envelope,
+  RepairApprovalBinding,
+  RepairPlan,
   TriggerIdentity,
 } from "./contracts.js";
 
@@ -52,6 +54,25 @@ export function envelopeRevisionHash(envelope: Envelope): string {
 
 export function bodyHash(envelope: Envelope): string {
   return sha256(envelope.body);
+}
+
+export function repairPlanHash(plan: RepairPlan): string {
+  return sha256(canonicalJson(plan));
+}
+
+export function repairApprovalBinding(
+  runId: string,
+  revision: number,
+  originalArtifactSha256: string,
+  plan: RepairPlan,
+): RepairApprovalBinding {
+  return {
+    run_id: runId,
+    revision,
+    original_artifact_sha256: originalArtifactSha256,
+    repair_plan_sha256: repairPlanHash(plan),
+    engine_version: plan.engine_version,
+  };
 }
 
 export function runKey(trigger: TriggerIdentity): string {

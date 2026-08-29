@@ -335,8 +335,9 @@ def _trueforge_workflow(
             "You are operating one Peel Run. Use only the Peel tools and preserve every argument exactly. "
             "The daemon is authoritative. Never invent, omit, or rewrite a Run identity. "
             "For expected_state, use the exact lowercase precondition: scan requires 'staged', "
-            "verify requires 'scanned', request_disclosure requires 'verified', and send_email "
-            "requires 'awaiting_disclosure_approval'. Never copy an uppercase result state or "
+            "verify requires 'scanned', apply_repair requires 'awaiting_repair_approval', "
+            "request_disclosure requires 'verified', and send_email requires 'awaiting_disclosure_approval'. "
+            "Never copy an uppercase result state or "
             "the state produced by the current command into expected_state. "
             "Set version to the exact string '1'. For every command, generate a fresh RFC 4122 "
             "UUID v4 string for command_id; it must be 36 characters with hyphens and the RFC "
@@ -349,9 +350,9 @@ def _trueforge_workflow(
         "mcp_servers": [
             {
                 "name": peel_server_name,
-                "enable_tools": ["scan", "verify", "request_disclosure", "send_email"],
+                "enable_tools": ["scan", "apply_repair", "verify", "request_disclosure", "send_email"],
                 "preload": True,
-                "require_approval_for_tools": ["send_email"],
+                "require_approval_for_tools": ["apply_repair", "send_email"],
             }
         ],
         "config": {

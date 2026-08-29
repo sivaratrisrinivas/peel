@@ -118,6 +118,18 @@ const bindingSchema = {
     body_sha256: hashSchema,
   },
 };
+const repairBindingSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["run_id", "revision", "original_artifact_sha256", "repair_plan_sha256", "engine_version"],
+  properties: {
+    run_id: uuidSchema,
+    revision: { type: "integer", minimum: 1 },
+    original_artifact_sha256: hashSchema,
+    repair_plan_sha256: hashSchema,
+    engine_version: { type: "string", minLength: 1 },
+  },
+};
 
 function toolSchema(name: string): JsonRecord {
   const commonProperties = {
@@ -156,6 +168,20 @@ function toolSchema(name: string): JsonRecord {
       },
     };
   }
+  if (name === "apply_repair") {
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["version", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "binding"],
+      properties: {
+        ...commonProperties,
+        expected_state: { const: "awaiting_repair_approval" },
+        approval_id: uuidSchema,
+        idempotency_key: uuidSchema,
+        binding: repairBindingSchema,
+      },
+    };
+  }
   if (name === "send_email") {
     return {
       type: "object",
@@ -180,7 +206,7 @@ function toolSchema(name: string): JsonRecord {
 }
 
 function toolDefinitions(): JsonRecord[] {
-  const names = ["stage", "scan", "verify", "request_disclosure", "respond_disclosure", "send_email"];
+  const names = ["stage", "scan", "apply_repair", "verify", "request_disclosure", "respond_disclosure", "send_email"];
   return names.map((name) => ({
     name,
     description:
@@ -188,7 +214,7 @@ function toolDefinitions(): JsonRecord[] {
         ? "Release the exact verified artifact after native Disclosure Approval."
         : `Execute the governed ${name} command.`,
     inputSchema: toolSchema(name),
-    ...(name === "send_email"
+    ...(name === "send_email" || name === "apply_repair"
       ? { annotations: { readOnlyHint: false, destructiveHint: true } }
       : {}),
   }));
@@ -221,7 +247,7 @@ async function handleMcp(daemon: PeelDaemon, payload: unknown): Promise<JsonReco
   if (
     typeof name !== "string" ||
     !isRecord(args) ||
-    !["stage", "scan", "verify", "request_disclosure", "respond_disclosure", "send_email"].includes(name)
+    !["stage", "scan", "apply_repair", "verify", "request_disclosure", "respond_disclosure", "send_email"].includes(name)
   ) {
     return jsonRpcError(id, -32602, "Invalid tool call");
   }

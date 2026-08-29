@@ -15,6 +15,7 @@ import {
   type DisclosureMessage,
   type EngineAdapter,
   type EngineScanResult,
+  type EngineRepairResult,
   type EngineVerifyResult,
   type Finding,
   type RevealRow,
@@ -22,8 +23,10 @@ import {
   type ScopeAssessmentInput,
   type ScopeAssessmentResult,
   type ScopeAssessmentStatus,
+  type RepairPlan,
 } from "./contracts.js";
-import { sha256 } from "./identity.js";
+import { repairPlanHash, sha256 } from "./identity.js";
+import { repairWorkbook, scanWorkbook, verifyWorkbook } from "./repair.js";
 
 export class ArtifactError extends Error {
   readonly code: "expired_artifact" | "undeclared_artifact" | "integrity_failure";
@@ -154,6 +157,10 @@ export class InMemoryArtifactStore implements ArtifactStore {
     const stored = this.artifacts.get(reference.reference);
     if (stored) stored.bytes = new Uint8Array(bytes);
   }
+
+  discard(reference: ArtifactReference): void {
+    this.artifacts.delete(reference.reference);
+  }
 }
 
 export class FakeDisclosureMailer implements DisclosureMailer {
@@ -170,6 +177,7 @@ export class FakeDisclosureMailer implements DisclosureMailer {
 
 interface BridgeResponse {
   result?: unknown;
+  candidate_bytes_base64?: unknown;
   status?: unknown;
 }
 
@@ -212,18 +220,43 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
   }
 
   scan(reference: ArtifactReference): EngineScanResult {
-    return this.invoke("scan", reference) as EngineScanResult;
+    const response = this.invoke("scan", reference);
+    return response.result as EngineScanResult;
   }
 
-  verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult {
-    return this.invoke("verify", reference, originalArtifactSha256) as EngineVerifyResult;
+  repair(reference: ArtifactReference, plan: RepairPlan): EngineRepairResult {
+    const response = this.invoke("repair", reference, undefined, plan);
+    const result = response.result;
+    if (!isRecord(result)) throw new Error("Daytona repair returned an invalid result");
+    if (result.status !== "repaired") return result as unknown as EngineRepairResult;
+    if (typeof response.candidate_bytes_base64 !== "string") throw new Error("Daytona repair returned no declared artifact");
+    let candidateBytes: Buffer;
+    try {
+      candidateBytes = Buffer.from(response.candidate_bytes_base64, "base64");
+    } catch {
+      throw new Error("Daytona repair returned invalid artifact bytes");
+    }
+    const candidate = this.artifacts.put(new Uint8Array(candidateBytes), reference.filename);
+    return { ...(result as unknown as EngineRepairResult), candidate_artifact: candidate };
+  }
+
+  verify(
+    reference: ArtifactReference,
+    originalArtifactSha256: string,
+    plan?: RepairPlan,
+    originalReference?: ArtifactReference,
+  ): EngineVerifyResult {
+    const response = this.invoke("verify", reference, originalArtifactSha256, plan, originalReference);
+    return response.result as EngineVerifyResult;
   }
 
   private invoke(
-    operation: "scan" | "verify",
+    operation: "scan" | "repair" | "verify",
     reference: ArtifactReference,
     originalArtifactSha256?: string,
-  ): unknown {
+    plan?: RepairPlan,
+    originalReference?: ArtifactReference,
+  ): BridgeResponse {
     const bytes = this.artifacts.read(reference);
     const response = runPythonBridge(this.bridgePath, {
       operation,
@@ -234,9 +267,11 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
       },
       bytes_base64: Buffer.from(bytes).toString("base64"),
       ...(originalArtifactSha256 ? { original_artifact_sha256: originalArtifactSha256 } : {}),
+      ...(plan ? { repair_plan: plan } : {}),
+      ...(originalReference ? { original_bytes_base64: Buffer.from(this.artifacts.read(originalReference)).toString("base64") } : {}),
     });
     if (!isRecord(response.result)) throw new Error("Daytona engine returned no result");
-    return response.result;
+    return response;
   }
 }
 
@@ -304,6 +339,10 @@ function allowedProfilePart(name: string): boolean {
   );
 }
 
+function localElement(element: string): string {
+  return `(?:[A-Za-z_][\\w.-]*:)?(?:${element})`;
+}
+
 function profileIsAccepted(files: Record<string, Uint8Array>): boolean {
   const contentTypes = files["[Content_Types].xml"];
   const workbook = files["xl/workbook.xml"];
@@ -316,14 +355,14 @@ function profileIsAccepted(files: Record<string, Uint8Array>): boolean {
 function hiddenFindings(workbook: Uint8Array, files: Record<string, Uint8Array>): Finding[] {
   const workbookXml = new TextDecoder().decode(workbook);
   const findings: Finding[] = [];
-  const hiddenSheets = workbookXml.match(/<sheet\b[^>]*\bstate=["'](?:hidden|veryHidden)["'][^>]*>/gi) ?? [];
+  const hiddenSheets = workbookXml.match(new RegExp(`<${localElement("sheet")}\\b[^>]*\\bstate=["'](?:hidden|veryHidden)["'][^>]*>`, "gi")) ?? [];
   if (hiddenSheets.length > 0) {
     findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
   }
   const hiddenRowsOrColumns = Object.entries(files).reduce((count, [name, bytes]) => {
     if (!name.startsWith("xl/worksheets/") || !name.endsWith(".xml")) return count;
     const xml = new TextDecoder().decode(bytes);
-    return count + (xml.match(/<(?:row|col)\b[^>]*\bhidden=["'](?:1|true)["'][^>]*>/gi) ?? []).length;
+    return count + (xml.match(new RegExp(`<${localElement("row|col")}\\b[^>]*\\bhidden=["'](?:1|true)["'][^>]*>`, "gi")) ?? []).length;
   }, 0);
   if (hiddenRowsOrColumns > 0) {
     findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: hiddenRowsOrColumns });
@@ -352,7 +391,7 @@ function decodeXml(value: string): string {
 }
 
 function workbookSheets(workbookXml: string): WorkbookSheet[] {
-  return Array.from(workbookXml.matchAll(/<sheet\b([^>]*)\/?>(?:<\/sheet>)?/gi), (match) => ({
+  return Array.from(workbookXml.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => ({
     name: decodeXml(xmlAttribute(match[1]!, "name") ?? ""),
     state: xmlAttribute(match[1]!, "state")?.toLowerCase(),
     relationshipId: xmlAttribute(match[1]!, "r:id") ?? xmlAttribute(match[1]!, "id") ?? "",
@@ -416,12 +455,14 @@ function rowsFromWorksheet(
 }
 
 export class FakeWorkbookEngine implements EngineAdapter {
-  constructor(private readonly artifacts: ArtifactStore) {}
+  constructor(
+    private readonly artifacts: ArtifactStore,
+    private readonly options: { repairEnabled?: boolean } = {},
+  ) {}
 
   scan(reference: ArtifactReference): EngineScanResult {
-    let bytes: Uint8Array;
     try {
-      bytes = this.artifacts.read(reference);
+      return scanWorkbook(this.artifacts.read(reference), reference.sha256);
     } catch (error) {
       return {
         version: "1",
@@ -434,43 +475,50 @@ export class FakeWorkbookEngine implements EngineAdapter {
         refusal_code: error instanceof ArtifactError ? "integrity_failure" : "unsupported_container",
       };
     }
-    let files: Record<string, Uint8Array>;
-    try {
-      files = unzipSync(bytes);
-    } catch {
+  }
+
+  repair(reference: ArtifactReference, plan: RepairPlan): EngineRepairResult {
+    if (this.options.repairEnabled === false) {
       return {
         version: "1",
-        operation: "scan",
+        operation: "repair",
         status: "refused",
         artifact_sha256: reference.sha256,
+        original_artifact_sha256: reference.sha256,
         engine_version: ENGINE_VERSION,
-        supported_profile: "refused",
-        findings: [],
-        refusal_code: "unsupported_container",
-      };
-    }
-    if (!profileIsAccepted(files)) {
-      return {
-        version: "1",
-        operation: "scan",
-        status: "refused",
-        artifact_sha256: reference.sha256,
-        engine_version: ENGINE_VERSION,
-        supported_profile: "refused",
-        findings: [],
+        repair_plan_sha256: repairPlanHash(plan),
+        changed_members: [],
         refusal_code: "unsupported_content",
       };
     }
-    const findings = hiddenFindings(files["xl/workbook.xml"]!, files);
-    return {
-      version: "1",
-      operation: "scan",
-      status: findings.length === 0 ? "clean" : "findings",
-      artifact_sha256: reference.sha256,
-      engine_version: ENGINE_VERSION,
-      supported_profile: "accepted",
-      findings,
-    };
+    const originalBytes = this.artifacts.read(reference);
+    try {
+      const repaired = repairWorkbook(originalBytes, plan, reference.sha256);
+      const candidate = this.artifacts.put(repaired.bytes, reference.filename);
+      return {
+        version: "1",
+        operation: "repair",
+        status: "repaired",
+        artifact_sha256: candidate.sha256,
+        original_artifact_sha256: reference.sha256,
+        engine_version: ENGINE_VERSION,
+        repair_plan_sha256: repairPlanHash(plan),
+        changed_members: repaired.changedMembers,
+        candidate_artifact: candidate,
+      };
+    } catch {
+      return {
+        version: "1",
+        operation: "repair",
+        status: "refused",
+        artifact_sha256: reference.sha256,
+        original_artifact_sha256: reference.sha256,
+        engine_version: ENGINE_VERSION,
+        repair_plan_sha256: repairPlanHash(plan),
+        changed_members: [],
+        refusal_code: "integrity_failure",
+      };
+    }
   }
 
   reveal(reference: ArtifactReference, finding: Finding): RevealRow[] {
@@ -504,33 +552,14 @@ export class FakeWorkbookEngine implements EngineAdapter {
     return rows;
   }
 
-  verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult {
-    const scan = this.scan(reference);
-    const unchanged = reference.sha256 === originalArtifactSha256;
-    if (scan.status !== "clean" || !unchanged) {
-      return {
-        version: "1",
-        operation: "verify",
-        status: "refused",
-        artifact_sha256: reference.sha256,
-        original_artifact_sha256: originalArtifactSha256,
-        engine_version: ENGINE_VERSION,
-        artifact_unchanged: unchanged,
-        baseline_sha256: reference.sha256,
-        remaining_findings: scan.findings,
-        refusal_code: unchanged ? scan.refusal_code : "integrity_failure",
-      };
-    }
-    return {
-      version: "1",
-      operation: "verify",
-      status: "verified",
-      artifact_sha256: reference.sha256,
-      original_artifact_sha256: originalArtifactSha256,
-      engine_version: ENGINE_VERSION,
-      artifact_unchanged: true,
-      baseline_sha256: reference.sha256,
-      remaining_findings: [],
-    };
+  verify(
+    reference: ArtifactReference,
+    originalArtifactSha256: string,
+    plan?: RepairPlan,
+    originalReference?: ArtifactReference,
+  ): EngineVerifyResult {
+    const candidateBytes = this.artifacts.read(reference);
+    const originalBytes = originalReference ? this.artifacts.read(originalReference) : candidateBytes;
+    return verifyWorkbook(candidateBytes, originalBytes, originalArtifactSha256, reference.sha256, plan);
   }
 }

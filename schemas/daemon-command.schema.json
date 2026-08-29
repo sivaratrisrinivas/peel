@@ -5,6 +5,7 @@
   "oneOf": [
     { "$ref": "#/$defs/stage" },
     { "$ref": "#/$defs/runCommand" },
+    { "$ref": "#/$defs/applyRepair" },
     { "$ref": "#/$defs/respondDisclosure" }
   ],
   "$defs": {
@@ -71,6 +72,35 @@
         "expected_state": { "const": "new" },
         "trigger": { "$ref": "#/$defs/trigger" },
         "envelope": { "$ref": "#/$defs/envelope" }
+      }
+    },
+    "repairBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "revision", "original_artifact_sha256", "repair_plan_sha256", "engine_version"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "original_artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "repair_plan_sha256": { "$ref": "#/$defs/sha256" },
+        "engine_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "applyRepair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "binding"],
+      "properties": {
+        "version": { "const": "1" },
+        "command": { "const": "apply_repair" },
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "expected_state": { "const": "awaiting_repair_approval" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "approval_id": { "$ref": "#/$defs/uuid" },
+        "idempotency_key": { "$ref": "#/$defs/uuid" },
+        "binding": { "$ref": "#/$defs/repairBinding" }
       }
     },
     "binding": {

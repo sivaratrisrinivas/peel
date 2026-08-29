@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import imaplib
 import json
 import os
@@ -10,12 +11,14 @@ import sys
 import zipfile
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Any
 
 from scripts import daytona_engine
 from scripts import mail_gate_probe
 
 
 ROOT = Path(__file__).resolve().parents[1]
+openpyxl: Any = importlib.import_module("openpyxl")
 
 
 def _workbook(path: Path, workbook_xml: str = '<workbook><sheets><sheet name="Visible" sheetId="1"/></sheets></workbook>') -> bytes:
@@ -55,7 +58,7 @@ def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_pa
     source = tmp_path / "hidden.xlsx"
     payload = _workbook(
         source,
-        '<workbook><sheets><sheet name="One" state="hidden"/><sheet name="Two" state="veryHidden"/></sheets></workbook>',
+        '<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheets><x:sheet name="One" state="hidden"/><x:sheet name="Two" state="veryHidden"/></x:sheets></x:workbook>',
     )
     result = daytona_engine._scan_package(source, hashlib.sha256(payload).hexdigest())
 
@@ -63,6 +66,57 @@ def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_pa
     assert result["findings"] == [
         {"mechanism": "hidden_worksheet", "location": "xl/workbook.xml", "count": 2}
     ]
+
+
+def test_production_engine_does_not_miss_xml_escaped_sheet_references(tmp_path: Path) -> None:
+    source = tmp_path / "escaped.xlsx"
+    workbook = openpyxl.Workbook()
+    visible = workbook.active
+    visible.title = "Visible"
+    visible["A1"] = "='R&D'!A1"
+    hidden = workbook.create_sheet("R&D")
+    hidden.sheet_state = "veryHidden"
+    hidden["A1"] = "secret"
+    workbook.save(source)
+    payload = source.read_bytes()
+
+    result = daytona_engine._scan_package(source, hashlib.sha256(payload).hexdigest())
+    assert result["repair_plan"]["status"] == "refused"
+    assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
+
+
+def test_production_engine_repairs_only_approved_ooxml_members(tmp_path: Path) -> None:
+    source = tmp_path / "hidden.xlsx"
+    workbook = openpyxl.Workbook()
+    visible = workbook.active
+    visible.title = "Visible"
+    hidden = workbook.create_sheet("Hidden")
+    hidden.sheet_state = "veryHidden"
+    hidden["A1"] = "secret"
+    workbook.save(source)
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+
+    scan = daytona_engine._scan_package(source, digest)
+    plan = scan["repair_plan"]
+    assert plan["status"] == "eligible"
+    repair = daytona_engine._repair_package(source, digest, plan)
+    candidate = Path(daytona_engine.REPAIR_OUTPUT_PATH)
+    candidate_digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assert repair["status"] == "repaired"
+    assert repair["artifact_sha256"] == candidate_digest
+    assert repair["changed_members"] == plan["changed_members"]
+
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(candidate) as repaired:
+        assert "xl/worksheets/sheet2.xml" not in repaired.namelist()
+        assert repaired.read("xl/worksheets/sheet1.xml") == original.read("xl/worksheets/sheet1.xml")
+        assert repaired.read("xl/theme/theme1.xml") == original.read("xl/theme/theme1.xml")
+
+    verified = daytona_engine._verify_package(candidate, candidate_digest, digest, source, plan)
+    assert verified["status"] == "verified"
+    assert verified["relationships_valid"] is True
+    assert verified["content_types_valid"] is True
+    assert verified["unexplained_changes"] == []
 
 
 def test_live_engine_cli_rejects_a_hash_mismatch_without_local_fallback(tmp_path: Path) -> None:
