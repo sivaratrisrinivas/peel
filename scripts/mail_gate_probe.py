@@ -195,14 +195,32 @@ def _header_may_be_eligible(message: EmailMessage, allowed_recipient: str | None
     )
 
 
-def _read_scan_cursor(path: Path, folder_uidvalidity: str, message_ids: list[bytes]) -> int:
+def _read_scan_cursor(
+    path: Path,
+    *,
+    host: str,
+    port: str,
+    username: str,
+    mailbox: str,
+    folder_uidvalidity: str,
+    message_ids: list[bytes],
+) -> int:
     if not message_ids:
         return 0
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError):
         return 0
-    if not isinstance(state, dict) or state.get("folder_uidvalidity") != folder_uidvalidity:
+    if not isinstance(state, dict) or any(
+        state.get(key) != value
+        for key, value in (
+            ("imap_host", host),
+            ("imap_port", port),
+            ("imap_username", username),
+            ("imap_mailbox", mailbox),
+            ("folder_uidvalidity", folder_uidvalidity),
+        )
+    ):
         return 0
     next_message_uid = state.get("next_message_uid")
     if not isinstance(next_message_uid, str):
@@ -214,13 +232,26 @@ def _read_scan_cursor(path: Path, folder_uidvalidity: str, message_ids: list[byt
         return 0
 
 
-def _write_scan_cursor(path: Path, folder_uidvalidity: str, message_id: bytes) -> None:
+def _write_scan_cursor(
+    path: Path,
+    *,
+    host: str,
+    port: str,
+    username: str,
+    mailbox: str,
+    folder_uidvalidity: str,
+    message_id: bytes,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(
         json.dumps(
             {
                 "version": SCHEMA_VERSION,
+                "imap_host": host,
+                "imap_port": port,
+                "imap_username": username,
+                "imap_mailbox": mailbox,
                 "folder_uidvalidity": folder_uidvalidity,
                 "next_message_uid": message_id.decode("ascii", errors="replace"),
             },
@@ -242,10 +273,11 @@ def _retrieve_eligible_draft(
     host = os.environ["IMAP_HOST"]
     username = os.environ["IMAP_USERNAME"]
     password = _secret("IMAP_PASSWORD")
+    port = os.environ.get("IMAP_PORT", "993")
     mailbox = os.environ.get("IMAP_DRAFTS_MAILBOX", "[Gmail]/Drafts")
     with imaplib.IMAP4_SSL(
         host,
-        int(os.environ.get("IMAP_PORT", "993")),
+        int(port),
         timeout=float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
     ) as client:
         login_status, _ = client.login(username, password)
@@ -263,7 +295,13 @@ def _retrieve_eligible_draft(
         scan_start = 0
         if max_messages is not None:
             scan_start = _read_scan_cursor(
-                cursor_path or DEFAULT_DRAFT_CURSOR_FILE, folder_uidvalidity, message_ids
+                cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+                host=host,
+                port=port,
+                username=username,
+                mailbox=mailbox,
+                folder_uidvalidity=folder_uidvalidity,
+                message_ids=message_ids,
             )
             scan_ids = [
                 ordered_ids[(scan_start + offset) % len(ordered_ids)]
@@ -292,11 +330,27 @@ def _retrieve_eligible_draft(
             if parsed is not None:
                 if max_messages is not None:
                     next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
-                    _write_scan_cursor(cursor_path or DEFAULT_DRAFT_CURSOR_FILE, folder_uidvalidity, next_id)
+                    _write_scan_cursor(
+                        cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+                        host=host,
+                        port=port,
+                        username=username,
+                        mailbox=mailbox,
+                        folder_uidvalidity=folder_uidvalidity,
+                        message_id=next_id,
+                    )
                 return parsed
         if max_messages is not None:
             next_id = ordered_ids[(scan_start + len(scan_ids)) % len(ordered_ids)]
-            _write_scan_cursor(cursor_path or DEFAULT_DRAFT_CURSOR_FILE, folder_uidvalidity, next_id)
+            _write_scan_cursor(
+                cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+                host=host,
+                port=port,
+                username=username,
+                mailbox=mailbox,
+                folder_uidvalidity=folder_uidvalidity,
+                message_id=next_id,
+            )
         return None
 
 

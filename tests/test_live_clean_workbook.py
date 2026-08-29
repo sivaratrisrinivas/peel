@@ -226,6 +226,62 @@ def test_mail_retrieval_batches_uids_and_wraps_with_a_persistent_cursor(monkeypa
     assert json.loads(cursor.read_text(encoding="utf-8"))["folder_uidvalidity"] == "uidvalidity-1"
 
 
+def test_mail_retrieval_does_not_reuse_cursor_across_mailbox_accounts(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("IMAP_PORT", "993")
+    monkeypatch.setenv("IMAP_USERNAME", "account-a@example.com")
+    monkeypatch.setenv("IMAP_PASSWORD", "password")
+    monkeypatch.setenv("PEEL_OWNED_RECIPIENT", "owned@example.com")
+    eligible = EmailMessage()
+    eligible["From"] = "sender@example.com"
+    eligible["To"] = "owned@example.com"
+    eligible["Subject"] = "Account B workbook"
+    eligible.set_content("Intended disclosure: visible workbook only.")
+    eligible.add_attachment(b"xlsx", maintype="application", subtype="octet-stream", filename="account-b.xlsx")
+
+    ineligible = EmailMessage()
+    ineligible["From"] = "sender@example.com"
+    ineligible["To"] = "owned@example.com"
+    ineligible["Subject"] = "Half-authored draft"
+    ineligible.set_content("Still writing.")
+
+    class FakeImap:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def login(self, _username, _password):
+            return "OK", []
+
+        def select(self, _mailbox, readonly=True):
+            assert readonly is True
+            return "OK", []
+
+        def response(self, name):
+            assert name == "UIDVALIDITY"
+            return "OK", [b"uidvalidity-1"]
+
+        def uid(self, operation, message_id, _query=None):
+            if operation == "search":
+                return "OK", [b"1 2 3"]
+            assert operation == "fetch"
+            raw = eligible.as_bytes() if os.environ["IMAP_USERNAME"].startswith("account-b") and message_id == "3" else ineligible.as_bytes()
+            return "OK", [(b"RFC822", raw)]
+
+    fake = FakeImap()
+    monkeypatch.setattr(mail_gate_probe.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: fake)
+    cursor = tmp_path / "mailbox-cursor.json"
+
+    assert mail_gate_probe._retrieve_eligible_draft(max_messages=1, cursor_path=cursor) is None
+    monkeypatch.setenv("IMAP_USERNAME", "account-b@example.com")
+    found = mail_gate_probe._retrieve_eligible_draft(max_messages=1, cursor_path=cursor)
+
+    assert found is not None
+    assert found.message_uid == "3"
+
+
 def test_mail_retrieval_configures_an_imap_socket_timeout(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

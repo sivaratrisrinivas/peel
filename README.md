@@ -63,10 +63,10 @@ The watcher is serial and SQLite-backed: an unchanged draft is deduplicated,
 an autosave edit creates a new envelope revision and invalidates prior
 judgment and authorization, an IMAP `UIDVALIDITY` change creates a distinct
 trigger identity, and an unrelated draft waits while one Run is active. The
-bridge scans a default batch of 25 UIDs per poll, uses a UIDVALIDITY-scoped
-cursor to wrap through older drafts, and fetches full messages only after
-lightweight header checks; the batch can be tuned up to 100 with
-`IMAP_DRAFT_SCAN_BATCH`.
+bridge scans a default batch of 25 UIDs per poll, uses a cursor scoped to the
+IMAP host, account, folder, and UIDVALIDITY to wrap through older drafts, and
+fetches full messages only after lightweight header checks; the batch can be
+tuned up to 100 with `IMAP_DRAFT_SCAN_BATCH`.
 Malformed or half-authored drafts are ignored without starting a Run. The
 watcher result and daemon log contain no draft body or attachment bytes.
 
