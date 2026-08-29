@@ -25,6 +25,35 @@ configured `ScopeAssessor` supplies a one-way advisory result; the default
 entry point refuses Findings when no assessor is available. Neither TrueForge
 nor an assessor can approve a Repair or Disclosure.
 
+## System flow
+
+```mermaid
+flowchart TD
+    Draft["Owned Gmail draft"] --> Watcher["MailboxWatcher<br/>IMAP bridge"]
+    Watcher -->|eligible envelope and bytes| Daemon["Peel daemon<br/>HTTP and MCP boundary"]
+    Daemon --> Store[("SQLite Run state<br/>in-memory artifact bytes")]
+    Store --> Scan["Deterministic scan"]
+    Scan --> Finding{"Finding?"}
+    Finding -- "No" --> Verified["Verified original artifact"]
+    Finding -- "Yes" --> Scope["ScopeAssessor<br/>advisory only"]
+    Scope --> Plan{"Eligible Repair Plan?"}
+    Plan -- "No or no context" --> Refused["Refused<br/>no Disclosure"]
+    Plan -- "Yes" --> RepairApproval{"Native Repair Approval"}
+    RepairApproval -- "Deny" --> Refused
+    RepairApproval -- "Approve" --> Daytona["Fresh Daytona sandbox<br/>Repair and Verification"]
+    Daytona --> Verification{"Verification passed?"}
+    Verification -- "No" --> Refused
+    Verification -- "Yes" --> Verified
+    Verified --> DisclosureApproval{"Native Disclosure Approval"}
+    DisclosureApproval -- "Deny" --> NoSMTP["No SMTP call"]
+    DisclosureApproval -- "Approve" --> SMTP["SMTP bridge"]
+    SMTP -- "Accepted" --> Recipient["Owned recipient mailbox"]
+    SMTP -- "Ambiguous" --> Unknown["delivery_unknown<br/>no automatic retry"]
+    SMTP -- "Rejected" --> Failed["failed or refused"]
+    TrueForge["TrueForge<br/>presentation and MCP client"] -. "commands and bounded metadata" .-> Daemon
+    Cerebras["Cerebras<br/>optional ScopeAssessor"] -. "advisory result" .-> Scope
+```
+
 ## Why it exists
 
 A workbook can contain data that its sender did not intend to release. A model
