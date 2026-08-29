@@ -177,6 +177,27 @@ export class PeelDaemon {
     return this.store.getActiveRuns().map((run) => publicRun(run, this.revealReferencesForRun(run)));
   }
 
+  /** Check whether restart-sensitive in-memory artifact and envelope materialization is present. */
+  hasRunMaterialization(run: RunView): boolean {
+    const stored = this.store.getRun(run.run_id);
+    const heldEnvelope = this.envelopes.get(run.run_id);
+    if (
+      !stored ||
+      stored.revision !== run.revision ||
+      stored.artifact.sha256 !== run.artifact.sha256 ||
+      !heldEnvelope ||
+      heldEnvelope.revision !== run.revision
+    ) {
+      return false;
+    }
+    try {
+      this.artifactStore.read(stored.artifact);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   uploadArtifact(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference {
     return this.artifactStore.put(bytes, filename, ttlMs);
   }
@@ -244,12 +265,13 @@ export class PeelDaemon {
         throw new CommandFailure("run_already_disclosed");
       }
       if (current.envelope_revision_hash === revisionHash) {
+        this.store.restoreArtifact(current.run_id, current.revision, envelope.attachment, this.clock.now());
         this.envelopes.set(current.run_id, {
           runId: current.run_id,
           revision: current.revision,
-          envelope: { ...envelope, attachment: current.artifact },
+          envelope,
         });
-        return success(current, { deduplicated: true });
+        return success(this.mustGetRun(current.run_id), { deduplicated: true });
       }
       const revised: Omit<StoredRun, "scan" | "verification" | "delivery"> = {
         ...current,

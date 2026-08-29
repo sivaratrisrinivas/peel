@@ -174,7 +174,11 @@ def _retrieve_eligible_draft() -> RetrievedDraft | None:
     username = os.environ["IMAP_USERNAME"]
     password = _secret("IMAP_PASSWORD")
     mailbox = os.environ.get("IMAP_DRAFTS_MAILBOX", "[Gmail]/Drafts")
-    with imaplib.IMAP4_SSL(host, int(os.environ.get("IMAP_PORT", "993"))) as client:
+    with imaplib.IMAP4_SSL(
+        host,
+        int(os.environ.get("IMAP_PORT", "993")),
+        timeout=float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
+    ) as client:
         login_status, _ = client.login(username, password)
         if login_status != "OK":
             return None
@@ -186,7 +190,10 @@ def _retrieve_eligible_draft() -> RetrievedDraft | None:
         if search_status != "OK" or not data or not data[0]:
             return None
         message_ids = data[0].split()
-        for message_id in reversed(message_ids[-100:]):
+        # Drafts are a small, bounded mailbox in the supported deployment, but
+        # eligibility must not depend on a recency window: an older eligible
+        # draft may sit behind newer half-authored drafts.
+        for message_id in reversed(message_ids):
             fetch_status, fetched = client.uid("fetch", message_id, "(RFC822)")
             if fetch_status != "OK":
                 continue

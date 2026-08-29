@@ -252,6 +252,32 @@ export class RunStore {
     );
   }
 
+  restoreArtifact(runId: string, revision: number, artifact: ArtifactReference, now: number): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.getRun(runId);
+      if (
+        !run ||
+        run.revision !== revision ||
+        run.artifact.sha256 !== artifact.sha256 ||
+        run.artifact.filename !== artifact.filename ||
+        run.artifact.byte_size !== artifact.byte_size
+      ) {
+        throw new Error("artifact restoration identity mismatch");
+      }
+      this.database.prepare(
+        "UPDATE runs SET artifact_json = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+      ).run(JSON.stringify(artifact), now, runId, revision);
+      this.database.prepare(
+        "UPDATE envelope_revisions SET attachment_json = ? WHERE run_id = ? AND revision = ?",
+      ).run(JSON.stringify(artifact), runId, revision);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   reviseRun(
     runId: string,
     run: Omit<StoredRun, "scan" | "verification" | "delivery">,

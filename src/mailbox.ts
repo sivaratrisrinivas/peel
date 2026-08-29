@@ -12,6 +12,7 @@ import type { PeelDaemon } from "./daemon.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_MAILBOX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 const DEFAULT_IMAP_SCRIPT = "scripts/mailbox_fetch.py";
 const CLAIMED_SCOPE_PATTERN = /^\s*Intended disclosure\s*:\s*(.*?)\s*$/i;
 
@@ -36,7 +37,7 @@ export interface MailboxSource {
   listDrafts(): Promise<readonly MailboxDraft[]>;
 }
 
-export type MailboxErrorCode = "mailbox_unavailable" | "mailbox_invalid_response";
+export type MailboxErrorCode = "mailbox_unavailable" | "mailbox_invalid_response" | "mailbox_timeout";
 
 export class MailboxError extends Error {
   readonly code: MailboxErrorCode;
@@ -82,6 +83,7 @@ export interface GmailImapMailboxOptions {
   scriptPath?: string;
   cwd?: string;
   environment?: NodeJS.ProcessEnv;
+  bridgeTimeoutMs?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -192,6 +194,10 @@ function bridgeString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function processTimedOut(error: unknown): boolean {
+  return isRecord(error) && (error.code === "ETIMEDOUT" || error.killed === true);
+}
+
 function decodeBridgeDraft(value: unknown): MailboxDraft {
   if (!isRecord(value)) throw new MailboxError("mailbox_invalid_response");
   const required = ["mailbox_account", "folder_uidvalidity", "message_uid", "sender", "subject", "body"] as const;
@@ -231,12 +237,17 @@ export class GmailImapMailbox implements MailboxSource {
   private readonly scriptPath: string;
   private readonly cwd: string;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly bridgeTimeoutMs: number;
 
   constructor(options: GmailImapMailboxOptions = {}) {
     this.pythonBin = options.pythonBin ?? process.env.PEEL_PYTHON_BIN ?? "python3";
     this.scriptPath = options.scriptPath ?? process.env.PEEL_MAILBOX_FETCH_SCRIPT ?? DEFAULT_IMAP_SCRIPT;
     this.cwd = options.cwd ?? process.cwd();
     this.environment = { ...process.env, ...(options.environment ?? {}) };
+    this.bridgeTimeoutMs = options.bridgeTimeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.bridgeTimeoutMs) || this.bridgeTimeoutMs <= 0) {
+      throw new RangeError("mailbox bridge timeout must be positive");
+    }
   }
 
   async listDrafts(): Promise<readonly MailboxDraft[]> {
@@ -247,10 +258,12 @@ export class GmailImapMailbox implements MailboxSource {
         env: this.environment,
         encoding: "utf8",
         maxBuffer: MAX_MAILBOX_RESPONSE_BYTES,
+        timeout: this.bridgeTimeoutMs,
+        killSignal: "SIGKILL",
       });
       stdout = result.stdout;
-    } catch {
-      throw new MailboxError("mailbox_unavailable");
+    } catch (error) {
+      throw new MailboxError(processTimedOut(error) ? "mailbox_timeout" : "mailbox_unavailable");
     }
     let payload: unknown;
     try {
@@ -303,6 +316,7 @@ export class MailboxWatcher {
   private readonly onResult?: (result: MailboxPollResult) => void;
   private inFlight?: Promise<MailboxPollResult>;
   private timer?: ReturnType<typeof setInterval>;
+  private stopped = false;
 
   constructor(options: MailboxWatcherOptions) {
     if (options.allowedRecipients.length === 0) throw new Error("at least one allowed recipient is required");
@@ -317,15 +331,19 @@ export class MailboxWatcher {
   }
 
   poll(): Promise<MailboxPollResult> {
+    if (this.stopped) return Promise.resolve({ status: "error", error_code: "watcher_stopped" });
     if (this.inFlight) return this.inFlight;
-    this.inFlight = this.pollOnce().finally(() => {
-      this.inFlight = undefined;
-    });
+    this.inFlight = this.pollOnce()
+      .catch(() => ({ status: "error", error_code: "watcher_failed" } satisfies MailboxPollResult))
+      .finally(() => {
+        this.inFlight = undefined;
+      });
     return this.inFlight;
   }
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     const tick = (): void => {
       void this.poll().then((result) => {
         try {
@@ -340,10 +358,14 @@ export class MailboxWatcher {
     this.timer.unref?.();
   }
 
-  stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = undefined;
+  stop(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    const inFlight = this.inFlight;
+    return inFlight ? inFlight.then(() => undefined, () => undefined) : Promise.resolve();
   }
 
   private async pollOnce(): Promise<MailboxPollResult> {
@@ -353,6 +375,7 @@ export class MailboxWatcher {
     } catch (error) {
       return { status: "error", error_code: error instanceof MailboxError ? error.code : "mailbox_unavailable" };
     }
+    if (this.stopped) return { status: "error", error_code: "watcher_stopped" };
     if (drafts.length === 0) return { status: "idle" };
 
     const candidate = drafts
@@ -361,7 +384,10 @@ export class MailboxWatcher {
     if (!candidate) return { status: "ignored", error_code: "ineligible_draft" };
 
     const existing = this.daemon.getRunForTrigger(candidate.identity);
-    if (existing?.envelope_revision_hash === candidate.identity.envelope_revision_hash) {
+    if (
+      existing?.envelope_revision_hash === candidate.identity.envelope_revision_hash &&
+      this.daemon.hasRunMaterialization(existing)
+    ) {
       return { status: "deduplicated", identity: candidate.identity, run: existing };
     }
 

@@ -10,7 +10,13 @@ import {
   InMemoryArtifactStore,
   PeelDaemon,
 } from "../src/daemon.js";
-import { FakeImapMailbox, GmailImapMailbox, MailboxWatcher, type MailboxDraft } from "../src/mailbox.js";
+import {
+  FakeImapMailbox,
+  GmailImapMailbox,
+  MailboxWatcher,
+  type MailboxDraft,
+  type MailboxSource,
+} from "../src/mailbox.js";
 import { MAX_ARTIFACT_BYTES, type EngineAdapter } from "../src/contracts.js";
 import { envelopeRevisionHash } from "../src/identity.js";
 
@@ -166,6 +172,23 @@ describe("Mailbox Trigger public boundary", () => {
       attachments: [{ filename: "workbook.xlsx" }],
     });
     expect(drafts[0]?.attachments[0]?.bytes).toEqual(new TextEncoder().encode("xlsx"));
+  });
+
+  it("turns a stalled IMAP bridge into a bounded timeout and permits the next poll", async () => {
+    const mailbox = new GmailImapMailbox({
+      pythonBin: "python3",
+      scriptPath: "tests/fixtures/mailbox-sleep.py",
+      cwd: process.cwd(),
+      bridgeTimeoutMs: 25,
+    });
+    const { daemon } = setup([]);
+    const watcher = new MailboxWatcher({ daemon, mailbox, allowedRecipients: [RECIPIENT] });
+
+    const first = await watcher.poll();
+    const second = await watcher.poll();
+
+    expect(first).toEqual({ status: "error", error_code: "mailbox_timeout" });
+    expect(second).toEqual({ status: "error", error_code: "mailbox_timeout" });
   });
 
   it("accepts one eligible draft, emits its complete identity, and deduplicates an unchanged poll", async () => {
@@ -336,7 +359,9 @@ describe("Mailbox Trigger public boundary", () => {
 
     const restarted = new PeelDaemon({
       allowedRecipients: [RECIPIENT],
-      artifactStore: firstSetup.artifacts,
+      // Production constructs a fresh in-memory registry on process start;
+      // the watcher must rematerialize the unchanged draft from IMAP.
+      artifactStore: new InMemoryArtifactStore(firstSetup.clock),
       clock: firstSetup.clock,
       engine: cleanEngine,
       databasePath: path,
@@ -359,6 +384,25 @@ describe("Mailbox Trigger public boundary", () => {
     expect(second).toBe(first);
     expect(mailbox.listCalls).toHaveLength(1);
     expect(daemon.getActiveRuns()).toHaveLength(1);
+  });
+
+  it("awaits an in-flight poll before shutdown and prevents post-stop daemon access", async () => {
+    let release: ((drafts: readonly MailboxDraft[]) => void) | undefined;
+    const mailbox: MailboxSource = {
+      listDrafts: () => new Promise((resolve) => {
+        release = resolve;
+      }),
+    };
+    const { daemon } = setup([]);
+    const watcher = new MailboxWatcher({ daemon, mailbox, allowedRecipients: [RECIPIENT] });
+    const poll = watcher.poll();
+    const stopped = watcher.stop();
+
+    release?.([]);
+
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(poll).resolves.toEqual({ status: "error", error_code: "watcher_stopped" });
+    await expect(watcher.poll()).resolves.toEqual({ status: "error", error_code: "watcher_stopped" });
   });
 
   it("keeps manual staging available when the optional watcher is not used", async () => {
