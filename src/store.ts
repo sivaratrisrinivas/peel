@@ -12,6 +12,8 @@ import type {
   VerificationEvidence,
 } from "./contracts.js";
 
+const ACTIVE_STATES = ["staged", "scanned", "verified", "awaiting_disclosure_approval", "disclosing"] as const;
+
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 
 export interface StoredRun {
@@ -182,30 +184,53 @@ export class RunStore {
     );
   }
 
+  getActiveRuns(): StoredRun[] {
+    const placeholders = ACTIVE_STATES.map(() => "?").join(", ");
+    const rows = this.database.prepare(
+      `SELECT * FROM runs WHERE state IN (${placeholders}) ORDER BY created_at ASC, run_id ASC`,
+    ).all(...ACTIVE_STATES) as Array<Record<string, unknown>>;
+    return rows.flatMap((row) => {
+      const run = this.readRun(row);
+      return run ? [run] : [];
+    });
+  }
+
   createRun(
     run: Omit<StoredRun, "scan" | "verification" | "delivery">,
     now: number,
-  ): void {
-    this.database.prepare(`
-      INSERT INTO runs (
-        run_id, run_key, revision, state, envelope_revision_hash, body_sha256,
-        sender, recipient, subject, artifact_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      run.run_id,
-      run.run_key,
-      run.revision,
-      run.state,
-      run.envelope_revision_hash,
-      run.body_sha256,
-      run.sender,
-      run.recipient,
-      run.subject,
-      JSON.stringify(run.artifact),
-      now,
-      now,
-    );
-    this.createRevision(run, now);
+  ): boolean {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.hasActiveRun()) {
+        this.database.exec("ROLLBACK");
+        return false;
+      }
+      this.database.prepare(`
+        INSERT INTO runs (
+          run_id, run_key, revision, state, envelope_revision_hash, body_sha256,
+          sender, recipient, subject, artifact_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        run.run_id,
+        run.run_key,
+        run.revision,
+        run.state,
+        run.envelope_revision_hash,
+        run.body_sha256,
+        run.sender,
+        run.recipient,
+        run.subject,
+        JSON.stringify(run.artifact),
+        now,
+        now,
+      );
+      this.createRevision(run, now);
+      this.database.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   createRevision(run: Omit<StoredRun, "scan" | "verification" | "delivery">, now: number): void {
@@ -227,13 +252,43 @@ export class RunStore {
     );
   }
 
+  restoreArtifact(runId: string, revision: number, artifact: ArtifactReference, now: number): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.getRun(runId);
+      if (
+        !run ||
+        run.revision !== revision ||
+        run.artifact.sha256 !== artifact.sha256 ||
+        run.artifact.filename !== artifact.filename ||
+        run.artifact.byte_size !== artifact.byte_size
+      ) {
+        throw new Error("artifact restoration identity mismatch");
+      }
+      this.database.prepare(
+        "UPDATE runs SET artifact_json = ?, updated_at = ? WHERE run_id = ? AND revision = ?",
+      ).run(JSON.stringify(artifact), now, runId, revision);
+      this.database.prepare(
+        "UPDATE envelope_revisions SET attachment_json = ? WHERE run_id = ? AND revision = ?",
+      ).run(JSON.stringify(artifact), runId, revision);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   reviseRun(
     runId: string,
     run: Omit<StoredRun, "scan" | "verification" | "delivery">,
     now: number,
-  ): void {
+  ): boolean {
     this.database.exec("BEGIN IMMEDIATE");
     try {
+      if (this.hasActiveRun(runId)) {
+        this.database.exec("ROLLBACK");
+        return false;
+      }
       this.database.prepare(`
         UPDATE runs SET revision = ?, state = ?, envelope_revision_hash = ?, body_sha256 = ?,
           sender = ?, recipient = ?, subject = ?, artifact_json = ?, scan_json = NULL,
@@ -256,6 +311,7 @@ export class RunStore {
         "UPDATE authorizations SET status = 'invalidated' WHERE run_id = ? AND status = 'pending'",
       ).run(runId);
       this.database.exec("COMMIT");
+      return true;
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
@@ -387,6 +443,15 @@ export class RunStore {
       verification: optionalJson<EngineVerifyResult>(record, "verification_json"),
       delivery: optionalJson<DeliveryEvidence>(record, "delivery_json"),
     };
+  }
+
+  private hasActiveRun(excludeRunId?: string): boolean {
+    const placeholders = ACTIVE_STATES.map(() => "?").join(", ");
+    const query = excludeRunId === undefined
+      ? `SELECT 1 AS found FROM runs WHERE state IN (${placeholders}) LIMIT 1`
+      : `SELECT 1 AS found FROM runs WHERE state IN (${placeholders}) AND run_id <> ? LIMIT 1`;
+    const parameters = excludeRunId === undefined ? [...ACTIVE_STATES] : [...ACTIVE_STATES, excludeRunId];
+    return Boolean(this.database.prepare(query).get(...parameters));
   }
 }
 

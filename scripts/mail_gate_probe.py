@@ -24,6 +24,9 @@ from typing import Any, cast
 SCHEMA_VERSION = "1"
 DEFAULT_EVIDENCE_FILE = "/tmp/peel-mail-evidence.json"
 MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
+DEFAULT_DRAFT_SCAN_BATCH = 25
+MAX_DRAFT_SCAN_BATCH = 100
+DEFAULT_DRAFT_CURSOR_FILE = Path("/tmp/peel-mailbox-cursor.json")
 REQUIRED_KEYS = (
     "IMAP_HOST",
     "IMAP_USERNAME",
@@ -169,12 +172,115 @@ def _uidvalidity(client: imaplib.IMAP4_SSL) -> str:
     raise RuntimeError("IMAP did not return UIDVALIDITY")
 
 
-def _retrieve_eligible_draft() -> RetrievedDraft | None:
+def _fetch_bytes(client: imaplib.IMAP4_SSL, message_id: bytes, query: str) -> bytes | None:
+    fetch_status, fetched = client.uid("fetch", message_id.decode("ascii", errors="replace"), query)
+    if fetch_status != "OK":
+        raise imaplib.IMAP4.error(f"IMAP fetch failed for UID {message_id!r}")
+    raw = b"".join(item[1] for item in fetched or [] if isinstance(item, tuple) and len(item) == 2)
+    return raw or None
+
+
+def _header_may_be_eligible(message: EmailMessage, allowed_recipient: str | None = None) -> bool:
+    configured_recipient = os.environ.get("PEEL_OWNED_RECIPIENT") or ""
+    allowed = (allowed_recipient or configured_recipient).strip().casefold()
+    recipients = getaddresses(
+        [str(value) for header in ("To", "Cc", "Bcc") for value in message.get_all(header, [])]
+    )
+    senders = getaddresses([str(value) for value in message.get_all("From", [])])
+    return (
+        bool(str(message.get("Subject", "")).strip())
+        and len(senders) == 1
+        and len(recipients) == 1
+        and bool(allowed)
+        and recipients[0][1].strip().casefold() == allowed
+    )
+
+
+def _read_scan_cursor(
+    path: Path,
+    *,
+    host: str,
+    port: str,
+    username: str,
+    mailbox: str,
+    folder_uidvalidity: str,
+    message_ids: list[bytes],
+) -> tuple[int, bool]:
+    if not message_ids:
+        return 0, False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return 0, False
+    if not isinstance(state, dict) or any(
+        state.get(key) != value
+        for key, value in (
+            ("imap_host", host),
+            ("imap_port", port),
+            ("imap_username", username),
+            ("imap_mailbox", mailbox),
+            ("folder_uidvalidity", folder_uidvalidity),
+        )
+    ):
+        return 0, False
+    next_message_uid = state.get("next_message_uid")
+    if not isinstance(next_message_uid, str):
+        return 0, False
+    ordered_ids = list(reversed(message_ids))
+    try:
+        return ordered_ids.index(next_message_uid.encode("ascii")), bool(state.get("repeat_current"))
+    except (ValueError, UnicodeEncodeError):
+        return 0, False
+
+
+def _write_scan_cursor(
+    path: Path,
+    *,
+    host: str,
+    port: str,
+    username: str,
+    mailbox: str,
+    folder_uidvalidity: str,
+    message_id: bytes,
+    repeat_current: bool,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "version": SCHEMA_VERSION,
+                "imap_host": host,
+                "imap_port": port,
+                "imap_username": username,
+                "imap_mailbox": mailbox,
+                "folder_uidvalidity": folder_uidvalidity,
+                "next_message_uid": message_id.decode("ascii", errors="replace"),
+                "repeat_current": repeat_current,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _retrieve_eligible_draft(
+    *, max_messages: int = DEFAULT_DRAFT_SCAN_BATCH, cursor_path: Path | None = None
+) -> RetrievedDraft | None:
+    if not isinstance(max_messages, int) or max_messages <= 0 or max_messages > MAX_DRAFT_SCAN_BATCH:
+        raise ValueError(f"max_messages must be between 1 and {MAX_DRAFT_SCAN_BATCH}")
     host = os.environ["IMAP_HOST"]
     username = os.environ["IMAP_USERNAME"]
     password = _secret("IMAP_PASSWORD")
+    port = os.environ.get("IMAP_PORT", "993")
     mailbox = os.environ.get("IMAP_DRAFTS_MAILBOX", "[Gmail]/Drafts")
-    with imaplib.IMAP4_SSL(host, int(os.environ.get("IMAP_PORT", "993"))) as client:
+    with imaplib.IMAP4_SSL(
+        host,
+        int(port),
+        timeout=float(os.environ.get("IMAP_TIMEOUT_SECONDS", "20")),
+    ) as client:
         login_status, _ = client.login(username, password)
         if login_status != "OK":
             return None
@@ -186,11 +292,28 @@ def _retrieve_eligible_draft() -> RetrievedDraft | None:
         if search_status != "OK" or not data or not data[0]:
             return None
         message_ids = data[0].split()
-        for message_id in reversed(message_ids[-100:]):
-            fetch_status, fetched = client.uid("fetch", message_id, "(RFC822)")
-            if fetch_status != "OK":
+        ordered_ids = list(reversed(message_ids))
+        scan_start, repeat_current = _read_scan_cursor(
+            cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+            host=host,
+            port=port,
+            username=username,
+            mailbox=mailbox,
+            folder_uidvalidity=folder_uidvalidity,
+            message_ids=message_ids,
+        )
+        scan_ids = [
+            ordered_ids[(scan_start + offset) % len(ordered_ids)]
+            for offset in range(min(max_messages, len(ordered_ids)))
+            ]
+        for offset, message_id in enumerate(scan_ids):
+            header_raw = _fetch_bytes(client, message_id, "(BODY.PEEK[HEADER])")
+            if not header_raw:
                 continue
-            raw = b"".join(item[1] for item in fetched if isinstance(item, tuple) and len(item) == 2)
+            header = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(header_raw))
+            if not _header_may_be_eligible(header):
+                continue
+            raw = _fetch_bytes(client, message_id, "(RFC822)")
             if not raw:
                 continue
             message = cast(EmailMessage, BytesParser(policy=policy.default).parsebytes(raw))
@@ -201,7 +324,32 @@ def _retrieve_eligible_draft() -> RetrievedDraft | None:
                 message_uid=message_id.decode("ascii", errors="replace"),
             )
             if parsed is not None:
+                if repeat_current:
+                    next_id = ordered_ids[(scan_start + offset + 1) % len(ordered_ids)]
+                else:
+                    next_id = message_id
+                _write_scan_cursor(
+                    cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+                    host=host,
+                    port=port,
+                    username=username,
+                    mailbox=mailbox,
+                    folder_uidvalidity=folder_uidvalidity,
+                    message_id=next_id,
+                    repeat_current=not repeat_current,
+                )
                 return parsed
+        next_id = ordered_ids[(scan_start + len(scan_ids)) % len(ordered_ids)]
+        _write_scan_cursor(
+            cursor_path or DEFAULT_DRAFT_CURSOR_FILE,
+            host=host,
+            port=port,
+            username=username,
+            mailbox=mailbox,
+            folder_uidvalidity=folder_uidvalidity,
+            message_id=next_id,
+            repeat_current=False,
+        )
         return None
 
 

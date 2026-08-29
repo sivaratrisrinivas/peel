@@ -42,6 +42,7 @@ export function envelopeRevisionHash(envelope: Envelope): string {
       body: envelope.body,
       attachment: {
         filename: envelope.attachment.filename,
+        media_type: envelope.attachment.media_type,
         sha256: envelope.attachment.sha256,
         byte_size: envelope.attachment.byte_size,
       },
@@ -54,7 +55,15 @@ export function bodyHash(envelope: Envelope): string {
 }
 
 export function runKey(trigger: TriggerIdentity): string {
-  return sha256(canonicalJson(trigger));
+  // Envelope revisions belong to one mailbox message/artifact identity. The
+  // stable key intentionally excludes the revision so an autosave edit
+  // increments the existing Run revision instead of creating a second Run.
+  return sha256(canonicalJson({
+    mailbox_account: trigger.mailbox_account,
+    folder_uidvalidity: trigger.folder_uidvalidity,
+    message_uid: trigger.message_uid,
+    attachment_sha256: trigger.attachment_sha256,
+  }));
 }
 
 export function disclosureFingerprint(

@@ -18,6 +18,7 @@ import {
   type ScopeAssessmentEvidence,
   type ScopeAssessor,
   type SuccessResponse,
+  type TriggerIdentity,
 } from "./contracts.js";
 import {
   ArtifactError,
@@ -165,6 +166,38 @@ export class PeelDaemon {
     return run ? publicRun(run, this.revealReferencesForRun(run)) : undefined;
   }
 
+  /** Return the Run for a stable mailbox message/artifact identity, if one exists. */
+  getRunForTrigger(trigger: TriggerIdentity): RunView | undefined {
+    const run = this.store.findRunByKey(runKey(trigger));
+    return run ? publicRun(run, this.revealReferencesForRun(run)) : undefined;
+  }
+
+  /** Return all non-terminal Runs so the watcher can enforce one active Run. */
+  getActiveRuns(): RunView[] {
+    return this.store.getActiveRuns().map((run) => publicRun(run, this.revealReferencesForRun(run)));
+  }
+
+  /** Check whether restart-sensitive in-memory artifact and envelope materialization is present. */
+  hasRunMaterialization(run: RunView): boolean {
+    const stored = this.store.getRun(run.run_id);
+    const heldEnvelope = this.envelopes.get(run.run_id);
+    if (
+      !stored ||
+      stored.revision !== run.revision ||
+      stored.artifact.sha256 !== run.artifact.sha256 ||
+      !heldEnvelope ||
+      heldEnvelope.revision !== run.revision
+    ) {
+      return false;
+    }
+    try {
+      this.artifactStore.read(stored.artifact);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   uploadArtifact(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference {
     return this.artifactStore.put(bytes, filename, ttlMs);
   }
@@ -215,6 +248,10 @@ export class PeelDaemon {
     parseClaimedScope(envelope.body);
     if (!this.allowedRecipients.has(envelope.recipient.toLowerCase())) throw new CommandFailure("recipient_not_allowed");
     if (envelope.attachment.byte_size > 10 * 1024 * 1024) throw new CommandFailure("artifact_too_large");
+    const revisionHash = envelopeRevisionHash(envelope);
+    if (trigger.envelope_revision_hash !== undefined && trigger.envelope_revision_hash !== revisionHash) {
+      throw new CommandFailure("trigger_identity_mismatch");
+    }
     try {
       this.artifactStore.read(envelope.attachment);
     } catch (error) {
@@ -222,19 +259,19 @@ export class PeelDaemon {
     }
 
     const key = runKey(trigger);
-    const revisionHash = envelopeRevisionHash(envelope);
     const current = this.store.findRunByKey(key);
     if (current) {
       if (current.state === "disclosed" && current.envelope_revision_hash !== revisionHash) {
         throw new CommandFailure("run_already_disclosed");
       }
       if (current.envelope_revision_hash === revisionHash) {
+        this.store.restoreArtifact(current.run_id, current.revision, envelope.attachment, this.clock.now());
         this.envelopes.set(current.run_id, {
           runId: current.run_id,
           revision: current.revision,
-          envelope: { ...envelope, attachment: current.artifact },
+          envelope,
         });
-        return success(current, { deduplicated: true });
+        return success(this.mustGetRun(current.run_id), { deduplicated: true });
       }
       const revised: Omit<StoredRun, "scan" | "verification" | "delivery"> = {
         ...current,
@@ -247,7 +284,9 @@ export class PeelDaemon {
         subject: envelope.subject,
         artifact: envelope.attachment,
       };
-      this.store.reviseRun(current.run_id, revised, this.clock.now());
+      if (!this.store.reviseRun(current.run_id, revised, this.clock.now())) {
+        throw new CommandFailure("active_run_exists");
+      }
       this.clearReveals(current.run_id);
       this.envelopes.set(current.run_id, { runId: current.run_id, revision: revised.revision, envelope });
       return success(this.mustGetRun(current.run_id));
@@ -265,7 +304,9 @@ export class PeelDaemon {
       subject: envelope.subject,
       artifact: envelope.attachment,
     };
-    this.store.createRun(run, this.clock.now());
+    if (!this.store.createRun(run, this.clock.now())) {
+      throw new CommandFailure("active_run_exists");
+    }
     this.envelopes.set(run.run_id, { runId: run.run_id, revision: run.revision, envelope });
     return success(this.mustGetRun(run.run_id));
   }
@@ -645,6 +686,8 @@ function publicErrorMessage(code: string): string {
     run_already_disclosed: "A disclosed Run cannot be revised.",
     run_not_found: "The Run does not exist.",
     stale_identity: "The command is bound to a stale or different Run identity.",
+    trigger_identity_mismatch: "The Mailbox Trigger identity does not match the exact draft envelope.",
+    active_run_exists: "Another Run is active; the Mailbox Trigger will be retried later.",
     stale_state: "The Run is not in the expected state for this command.",
     authorization_not_found: "The Disclosure Approval does not exist.",
     authorization_binding_mismatch: "The Disclosure Approval is not bound to this exact envelope and artifact.",
