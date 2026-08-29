@@ -341,6 +341,41 @@ def _sheet_in_span(
     return normalized(first) == normalized(sheet["name"]) or normalized(last) == normalized(sheet["name"])
 
 
+def _three_dimensional_range_contains_targets(
+    text: str,
+    sheet: dict[str, str],
+    targets: list[tuple[str, int, int]],
+    sheet_order: list[dict[str, str]],
+    range_kind: str,
+) -> bool:
+    for first in sheet_order:
+        for last in sheet_order:
+            if first["path"] == last["path"] or not _sheet_in_span(sheet, first["name"], last["name"], sheet_order):
+                continue
+            prefixes = (
+                rf"'{re.escape(first['name'].replace(chr(39), chr(39) * 2))}:{re.escape(last['name'].replace(chr(39), chr(39) * 2))}'!",
+                rf"{re.escape(first['name'])}:{re.escape(last['name'])}!",
+            )
+            if range_kind == "cells":
+                suffix = r"\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?"
+            elif range_kind == "columns":
+                suffix = r"\$?([A-Z]{1,3}):\$?([A-Z]{1,3})"
+            else:
+                suffix = r"\$?([1-9][0-9]*):\$?([1-9][0-9]*)"
+            for prefix in prefixes:
+                for match in re.finditer(prefix + suffix, text, re.IGNORECASE):
+                    if range_kind == "columns" and _column_range_contains_targets(targets, match.group(1), match.group(2)):
+                        return True
+                    if range_kind == "rows" and _row_range_contains_targets(targets, match.group(1), match.group(2)):
+                        return True
+                    if range_kind == "cells":
+                        start = _cell_info(f"{match.group(1)}{match.group(2)}")
+                        end = _cell_info(f"{match.group(3) or match.group(1)}{match.group(4) or match.group(2)}")
+                        if start and end and any(_cell_in_range(target, start, end) for target in targets):
+                            return True
+    return False
+
+
 def _references_cells(
     text: str,
     sheet: dict[str, str],
@@ -358,7 +393,7 @@ def _references_cells(
         return referenced_sheet.casefold() == sheet["name"].casefold()
 
     reference_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
+        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
         re.IGNORECASE,
     )
     for match in reference_pattern.finditer(decoded):
@@ -368,66 +403,21 @@ def _references_cells(
         end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
-    quoted_three_dimensional_pattern = re.compile(
-        r"'((?:[^']|'')+)'!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
-        re.IGNORECASE,
-    )
-    for match in quoted_three_dimensional_pattern.finditer(decoded):
-        names = (match.group(1) or "").split(":")
-        if len(names) != 2 or not _sheet_in_span(sheet, names[0], names[1], sheet_order):
-            continue
-        start = _cell_info(f"{match.group(2)}{match.group(3)}")
-        end = _cell_info(f"{match.group(4) or match.group(2)}{match.group(5) or match.group(3)}")
-        if start and end and any(_cell_in_range(target, start, end) for target in targets):
-            return True
-    three_dimensional_pattern = re.compile(
-        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
-        re.IGNORECASE,
-    )
-    for match in three_dimensional_pattern.finditer(decoded):
-        if not _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order):
-            continue
-        start = _cell_info(f"{match.group(3)}{match.group(4)}")
-        end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
-        if start and end and any(_cell_in_range(target, start, end) for target in targets):
-            return True
-    quoted_three_dimensional_column_pattern = re.compile(
-        r"'((?:[^']|'')+)'!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})", re.IGNORECASE
-    )
-    for match in quoted_three_dimensional_column_pattern.finditer(decoded):
-        names = (match.group(1) or "").split(":")
-        if len(names) == 2 and _sheet_in_span(sheet, names[0], names[1], sheet_order) and _column_range_contains_targets(targets, match.group(2), match.group(3)):
-            return True
-    quoted_three_dimensional_row_pattern = re.compile(
-        r"'((?:[^']|'')+)'!\$?([1-9][0-9]*):\$?([1-9][0-9]*)", re.IGNORECASE
-    )
-    for match in quoted_three_dimensional_row_pattern.finditer(decoded):
-        names = (match.group(1) or "").split(":")
-        if len(names) == 2 and _sheet_in_span(sheet, names[0], names[1], sheet_order) and _row_range_contains_targets(targets, match.group(2), match.group(3)):
-            return True
-    three_dimensional_column_pattern = re.compile(
-        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
-        re.IGNORECASE,
-    )
-    for match in three_dimensional_column_pattern.finditer(decoded):
-        if _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order) and _column_range_contains_targets(targets, match.group(3), match.group(4)):
-            return True
-    three_dimensional_row_pattern = re.compile(
-        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
-        re.IGNORECASE,
-    )
-    for match in three_dimensional_row_pattern.finditer(decoded):
-        if _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order) and _row_range_contains_targets(targets, match.group(3), match.group(4)):
-            return True
+    if (
+        _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "cells")
+        or _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "columns")
+        or _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "rows")
+    ):
+        return True
     qualified_column_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
+        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
         re.IGNORECASE,
     )
     for match in qualified_column_pattern.finditer(decoded):
         if sheet_matches(match) and _column_range_contains_targets(targets, match.group(3), match.group(4)):
             return True
     qualified_row_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
+        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
         re.IGNORECASE,
     )
     for match in qualified_row_pattern.finditer(decoded):

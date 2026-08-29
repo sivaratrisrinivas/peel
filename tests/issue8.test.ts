@@ -37,7 +37,12 @@ function concealedWorksheet(): string {
     "</sheetData></worksheet>";
 }
 
-function threeSheetWorkbook(formula: string, concealedSheet = 2, formulaSheet = 1): Uint8Array {
+function threeSheetWorkbook(
+  formula: string,
+  concealedSheet = 2,
+  formulaSheet = 1,
+  sheetNames = ["Sheet1", "Sheet2", "Sheet3"],
+): Uint8Array {
   const worksheet = (sheetNumber: number) => {
     const rows = [
       sheetNumber === formulaSheet ? `<row r='1'><c r='A1'><f>${formula}</f></c></row>` : "",
@@ -49,10 +54,10 @@ function threeSheetWorkbook(formula: string, concealedSheet = 2, formulaSheet = 
     worksheet(1),
     {
       "xl/workbook.xml": text.encode(
-        "<workbook><sheets>" +
-          "<sheet name='Sheet1' sheetId='1' r:id='rId1'/>" +
-          "<sheet name='Sheet2' sheetId='2' r:id='rId2'/>" +
-          "<sheet name='Sheet3' sheetId='3' r:id='rId3'/>" +
+          "<workbook><sheets>" +
+          `<sheet name='${sheetNames[0]}' sheetId='1' r:id='rId1'/>` +
+          `<sheet name='${sheetNames[1]}' sheetId='2' r:id='rId2'/>` +
+          `<sheet name='${sheetNames[2]}' sheetId='3' r:id='rId3'/>` +
           "</sheets></workbook>",
       ),
       "xl/_rels/workbook.xml.rels": text.encode(
@@ -301,6 +306,18 @@ describe("Issue #8 dependency refusal", () => {
         expect(result.error.code).toBe("repair_refused");
         expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain(`xl/worksheets/sheet${formulaSheet}.xml`);
       }
+    },
+  );
+
+  it.each(["SUM(一月:三月!A:A)", "SUM(一月:三月!2:2)"])(
+    "refuses concealed values in a Unicode 3-D whole range (%s)",
+    async (formula) => {
+      const base = setup(threeSheetWorkbook(formula, 2, 1, ["一月", "二月", "三月"]));
+      const result = await scan(base.daemon, base.artifact);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe("repair_refused");
+      expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain("xl/worksheets/sheet1.xml");
     },
   );
 

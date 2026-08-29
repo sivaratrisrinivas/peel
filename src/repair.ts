@@ -333,6 +333,45 @@ function sheetInSpan(
   return normalizedSheetName(first) === normalizedSheetName(sheet.name) || normalizedSheetName(last) === normalizedSheetName(sheet.name);
 }
 
+function escapedRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function threeDimensionalRangeContainsTargets(
+  text: string,
+  sheet: SheetInfo,
+  targets: readonly CellInfo[],
+  sheetOrder: readonly SheetInfo[],
+  range: "cells" | "columns" | "rows",
+): boolean {
+  for (const first of sheetOrder) {
+    for (const last of sheetOrder) {
+      if (first.path === last.path || !sheetInSpan(sheet, first.name, last.name, sheetOrder)) continue;
+      const prefixes = [
+        `'${escapedRegex(first.name.replace(/'/g, "''"))}:${escapedRegex(last.name.replace(/'/g, "''"))}'!`,
+        `${escapedRegex(first.name)}:${escapedRegex(last.name)}!`,
+      ];
+      const suffix = range === "cells"
+        ? "\\$?([A-Z]{1,3})\\$?([1-9][0-9]*)(?::\\$?([A-Z]{1,3})\\$?([1-9][0-9]*))?"
+        : range === "columns"
+          ? "\\$?([A-Z]{1,3}):\\$?([A-Z]{1,3})"
+          : "\\$?([1-9][0-9]*):\\$?([1-9][0-9]*)";
+      for (const prefix of prefixes) {
+        for (const match of text.matchAll(new RegExp(prefix + suffix, "gi"))) {
+          if (range === "columns" && columnRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+          if (range === "rows" && rowRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+          if (range === "cells") {
+            const start = cellInfo(`${match[1]}${match[2]}`);
+            const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
+            if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function referencesCells(
   text: string,
   sheet: SheetInfo,
@@ -348,53 +387,21 @@ function referencesCells(
     const referencedSheet = match[1] !== undefined ? match[1]!.replace(/''/g, "'") : match[2];
     return Boolean(referencedSheet && referencedSheet.trim().toLowerCase() === sheet.name.toLowerCase());
   };
-  const referencePattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
+  const referencePattern = /(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
   for (const match of decoded.matchAll(referencePattern)) {
     if (!sheetMatches(match)) continue;
     const start = cellInfo(`${match[3]}${match[4]}`);
     const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
   }
-  const quotedThreeDimensionalPattern = /'((?:[^']|'')+)'!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
-  for (const match of decoded.matchAll(quotedThreeDimensionalPattern)) {
-    const names = (match[1] ?? "").split(":");
-    if (names.length !== 2 || !sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder)) continue;
-    const start = cellInfo(`${match[2]}${match[3]}`);
-    const end = cellInfo(`${match[4] ?? match[2]}${match[5] ?? match[3]}`);
-    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
-  }
-  const threeDimensionalPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
-  for (const match of decoded.matchAll(threeDimensionalPattern)) {
-    if (!sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder)) continue;
-    const start = cellInfo(`${match[3]}${match[4]}`);
-    const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
-    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
-  }
-  const quotedThreeDimensionalColumnPattern = /'((?:[^']|'')+)'!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
-  for (const match of decoded.matchAll(quotedThreeDimensionalColumnPattern)) {
-    const names = (match[1] ?? "").split(":");
-    if (names.length === 2 && sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder) &&
-      columnRangeContainsTargets(targets, match[2]!, match[3]!)) return true;
-  }
-  const quotedThreeDimensionalRowPattern = /'((?:[^']|'')+)'!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
-  for (const match of decoded.matchAll(quotedThreeDimensionalRowPattern)) {
-    const names = (match[1] ?? "").split(":");
-    if (names.length === 2 && sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder) &&
-      rowRangeContainsTargets(targets, match[2]!, match[3]!)) return true;
-  }
-  const threeDimensionalColumnPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
-  for (const match of decoded.matchAll(threeDimensionalColumnPattern)) {
-    if (sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder) && columnRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
-  }
-  const threeDimensionalRowPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
-  for (const match of decoded.matchAll(threeDimensionalRowPattern)) {
-    if (sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder) && rowRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
-  }
-  const qualifiedColumnPattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
+  if (threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "cells") ||
+    threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "columns") ||
+    threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "rows")) return true;
+  const qualifiedColumnPattern = /(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
   for (const match of decoded.matchAll(qualifiedColumnPattern)) {
     if (sheetMatches(match) && columnRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
   }
-  const qualifiedRowPattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
+  const qualifiedRowPattern = /(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
   for (const match of decoded.matchAll(qualifiedRowPattern)) {
     if (sheetMatches(match) && rowRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
   }
