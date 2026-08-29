@@ -5,9 +5,14 @@ import {
   type Command,
   type DisclosureBinding,
   type EngineScanResult,
+  type EngineRepairResult,
   type EngineVerifyResult,
   type Envelope,
   type Finding,
+  type DependencyAnalysis,
+  type RepairAction,
+  type RepairApprovalBinding,
+  type RepairPlan,
   type ScopeAssessmentResult,
   type TriggerIdentity,
 } from "./contracts.js";
@@ -164,12 +169,86 @@ function parseBinding(value: unknown): DisclosureBinding {
   };
 }
 
+function parseRepairBinding(value: unknown): RepairApprovalBinding {
+  const input = record(value, "binding");
+  exactKeys(input, ["run_id", "revision", "original_artifact_sha256", "repair_plan_sha256", "engine_version"], "binding");
+  return {
+    run_id: uuidValue(input.run_id, "binding.run_id"),
+    revision: integerValue(input.revision, "binding.revision", 1),
+    original_artifact_sha256: hashValue(input.original_artifact_sha256, "binding.original_artifact_sha256"),
+    repair_plan_sha256: hashValue(input.repair_plan_sha256, "binding.repair_plan_sha256"),
+    engine_version: stringValue(input.engine_version, "binding.engine_version"),
+  };
+}
+
+function parseStringArray(value: unknown, path: string, minimum = 0): string[] {
+  if (!Array.isArray(value)) throw new SchemaError(`${path} must be an array`);
+  if (value.length < minimum) throw new SchemaError(`${path} must contain at least ${minimum} item(s)`);
+  return value.map((item, index) => stringValue(item, `${path}[${index}]`));
+}
+
+function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
+  const input = record(value, "repair_plan.dependency_analysis");
+  const keys = [
+    "visible_formulas",
+    "defined_names",
+    "data_validation",
+    "tables",
+    "charts",
+    "pivots",
+    "package_relationships",
+    "macros",
+    "external_connections",
+  ] as const;
+  exactKeys(input, keys, "repair_plan.dependency_analysis");
+  return Object.fromEntries(keys.map((key) => [key, parseStringArray(input[key], `repair_plan.dependency_analysis.${key}`)])) as unknown as DependencyAnalysis;
+}
+
+function parseRepairAction(value: unknown, index: number): RepairAction {
+  const input = record(value, `repair_plan.actions[${index}]`);
+  exactKeys(input, ["kind", "worksheet", "target_member", "changed_members", "capability_losses"], `repair_plan.actions[${index}]`);
+  return {
+    kind: enumValue(input.kind, ["delete_hidden_worksheet"] as const, `repair_plan.actions[${index}].kind`),
+    worksheet: stringValue(input.worksheet, `repair_plan.actions[${index}].worksheet`),
+    target_member: stringValue(input.target_member, `repair_plan.actions[${index}].target_member`),
+    changed_members: parseStringArray(input.changed_members, `repair_plan.actions[${index}].changed_members`, 1),
+    capability_losses: parseStringArray(input.capability_losses, `repair_plan.actions[${index}].capability_losses`, 1),
+  };
+}
+
+function parseRepairPlan(value: unknown): RepairPlan {
+  const input = record(value, "repair_plan");
+  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "engine_version", "dependency_analysis", "actions", "changed_members", "capability_losses", "refusal_reasons"], "repair_plan");
+  if (input.version !== API_VERSION || input.operation !== "repair_plan") throw new SchemaError("repair plan identity is invalid");
+  const actionsValue = input.actions;
+  if (!Array.isArray(actionsValue)) throw new SchemaError("repair_plan.actions must be an array");
+  const output: RepairPlan = {
+    version: API_VERSION,
+    operation: "repair_plan",
+    status: enumValue(input.status, ["eligible", "refused"] as const, "repair_plan.status"),
+    artifact_sha256: hashValue(input.artifact_sha256, "repair_plan.artifact_sha256"),
+    engine_version: stringValue(input.engine_version, "repair_plan.engine_version"),
+    dependency_analysis: parseDependencyAnalysis(input.dependency_analysis),
+    actions: actionsValue.map(parseRepairAction),
+    changed_members: parseStringArray(input.changed_members, "repair_plan.changed_members", 0),
+    capability_losses: parseStringArray(input.capability_losses, "repair_plan.capability_losses", 1),
+  };
+  if (input.refusal_reasons !== undefined) output.refusal_reasons = parseStringArray(input.refusal_reasons, "repair_plan.refusal_reasons", 1);
+  if (output.status === "eligible" && (output.actions.length === 0 || output.changed_members.length === 0)) {
+    throw new SchemaError("eligible repair plan must contain actions and changed members");
+  }
+  if (output.status === "refused" && (output.actions.length !== 0 || !output.refusal_reasons)) {
+    throw new SchemaError("refused repair plan must contain refusal reasons and no actions");
+  }
+  return output;
+}
+
 export function parseCommand(value: unknown): Command {
   const input = record(value, "command");
   if (input.version !== API_VERSION) throw new SchemaError("command.version is unsupported");
   const command = enumValue(
     input.command,
-    ["stage", "scan", "verify", "request_disclosure", "respond_disclosure"] as const,
+    ["stage", "scan", "apply_repair", "verify", "request_disclosure", "respond_disclosure"] as const,
     "command.command",
   );
   parseCommandBase(input, "command");
@@ -189,12 +268,15 @@ export function parseCommand(value: unknown): Command {
     input,
     command === "respond_disclosure"
       ? ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "decision", "binding"]
+      : command === "apply_repair"
+        ? ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256", "approval_id", "idempotency_key", "binding"]
       : ["version", "command", "command_id", "expected_state", "run_id", "revision", "artifact_sha256"],
     "command",
   );
   const base = parseRunBase(input, "command");
   const expectedStates = {
     scan: "staged",
+    apply_repair: "awaiting_repair_approval",
     verify: "scanned",
     request_disclosure: "verified",
     respond_disclosure: "awaiting_disclosure_approval",
@@ -203,6 +285,16 @@ export function parseCommand(value: unknown): Command {
     throw new SchemaError(`${command}.expected_state is invalid`);
   }
   if (command === "scan") return { version: API_VERSION, command, command_id: String(input.command_id), expected_state: "staged", ...base };
+  if (command === "apply_repair") return {
+    version: API_VERSION,
+    command,
+    command_id: String(input.command_id),
+    expected_state: "awaiting_repair_approval",
+    ...base,
+    approval_id: uuidValue(input.approval_id, "command.approval_id"),
+    idempotency_key: uuidValue(input.idempotency_key, "command.idempotency_key"),
+    binding: parseRepairBinding(input.binding),
+  };
   if (command === "verify") return { version: API_VERSION, command, command_id: String(input.command_id), expected_state: "scanned", ...base };
   if (command === "request_disclosure") return { version: API_VERSION, command, command_id: String(input.command_id), expected_state: "verified", ...base };
   return {
@@ -235,7 +327,7 @@ function parseFindings(value: unknown): Finding[] {
 
 export function parseEngineScanResult(value: unknown): EngineScanResult {
   const input = record(value, "engine result");
-  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "engine_version", "supported_profile", "findings", "refusal_code"], "engine result");
+  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "engine_version", "supported_profile", "findings", "repair_plan", "refusal_code"], "engine result");
   if (input.version !== API_VERSION || input.operation !== "scan") throw new SchemaError("engine scan identity is invalid");
   const status = enumValue(input.status, ["clean", "findings", "refused"] as const, "engine.status");
   const supportedProfile = enumValue(input.supported_profile, ["accepted", "refused"] as const, "engine.supported_profile");
@@ -254,15 +346,37 @@ export function parseEngineScanResult(value: unknown): EngineScanResult {
     supported_profile: supportedProfile,
     findings,
   };
+  if (input.repair_plan !== undefined) output.repair_plan = parseRepairPlan(input.repair_plan);
   if (input.refusal_code !== undefined) {
     output.refusal_code = enumValue(input.refusal_code, ["unsupported_container", "unsupported_content", "integrity_failure"] as const, "engine.refusal_code");
   }
   return output;
 }
 
+export function parseEngineRepairResult(value: unknown): EngineRepairResult {
+  const input = record(value, "engine result");
+  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "original_artifact_sha256", "engine_version", "repair_plan_sha256", "changed_members", "candidate_artifact", "refusal_code"], "engine result");
+  if (input.version !== API_VERSION || input.operation !== "repair") throw new SchemaError("engine repair identity is invalid");
+  const status = enumValue(input.status, ["repaired", "refused"] as const, "engine.status");
+  const output: EngineRepairResult = {
+    version: API_VERSION,
+    operation: "repair",
+    status,
+    artifact_sha256: hashValue(input.artifact_sha256, "engine.artifact_sha256"),
+    original_artifact_sha256: hashValue(input.original_artifact_sha256, "engine.original_artifact_sha256"),
+    engine_version: stringValue(input.engine_version, "engine.engine_version"),
+    repair_plan_sha256: hashValue(input.repair_plan_sha256, "engine.repair_plan_sha256"),
+    changed_members: parseStringArray(input.changed_members, "engine.changed_members"),
+  };
+  if (input.candidate_artifact !== undefined) output.candidate_artifact = parseArtifactReference(input.candidate_artifact, "engine.candidate_artifact");
+  if (status === "repaired" && output.candidate_artifact === undefined) throw new SchemaError("repaired result must contain a candidate artifact");
+  if (input.refusal_code !== undefined) output.refusal_code = enumValue(input.refusal_code, ["unsupported_container", "unsupported_content", "integrity_failure"] as const, "engine.refusal_code");
+  return output;
+}
+
 export function parseEngineVerifyResult(value: unknown): EngineVerifyResult {
   const input = record(value, "engine result");
-  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "original_artifact_sha256", "engine_version", "artifact_unchanged", "baseline_sha256", "remaining_findings", "refusal_code"], "engine result");
+  exactKeys(input, ["version", "operation", "status", "artifact_sha256", "original_artifact_sha256", "engine_version", "artifact_unchanged", "baseline_sha256", "remaining_findings", "relationships_valid", "content_types_valid", "reopened_with", "changed_members", "unexplained_changes", "refusal_code"], "engine result");
   if (input.version !== API_VERSION || input.operation !== "verify") throw new SchemaError("engine verify identity is invalid");
   const status = enumValue(input.status, ["verified", "refused"] as const, "engine.status");
   if (typeof input.artifact_unchanged !== "boolean") throw new SchemaError("engine.artifact_unchanged must be boolean");
@@ -281,6 +395,17 @@ export function parseEngineVerifyResult(value: unknown): EngineVerifyResult {
     baseline_sha256: hashValue(input.baseline_sha256, "engine.baseline_sha256"),
     remaining_findings: remainingFindings,
   };
+  if (input.relationships_valid !== undefined) {
+    if (typeof input.relationships_valid !== "boolean") throw new SchemaError("engine.relationships_valid must be boolean");
+    output.relationships_valid = input.relationships_valid;
+  }
+  if (input.content_types_valid !== undefined) {
+    if (typeof input.content_types_valid !== "boolean") throw new SchemaError("engine.content_types_valid must be boolean");
+    output.content_types_valid = input.content_types_valid;
+  }
+  if (input.reopened_with !== undefined) output.reopened_with = parseStringArray(input.reopened_with, "engine.reopened_with");
+  if (input.changed_members !== undefined) output.changed_members = parseStringArray(input.changed_members, "engine.changed_members");
+  if (input.unexplained_changes !== undefined) output.unexplained_changes = parseStringArray(input.unexplained_changes, "engine.unexplained_changes");
   if (input.refusal_code !== undefined) {
     output.refusal_code = enumValue(input.refusal_code, ["unsupported_container", "unsupported_content", "integrity_failure"] as const, "engine.refusal_code");
   }

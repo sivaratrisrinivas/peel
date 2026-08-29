@@ -94,7 +94,7 @@ async function scanHiddenWorkbook(daemon: PeelDaemon, artifact: ReturnType<InMem
 }
 
 describe("Issue #5 concealed-data Attack", () => {
-  it("reports hidden worksheets regardless of their values and terminates as a visible Refusal", async () => {
+  it("reports hidden worksheets regardless of their values and waits for the separate Repair Approval", async () => {
     const first = setup(["legitimate-looking value"]);
     const second = setup(["suspicious-looking secret"]);
 
@@ -104,7 +104,7 @@ describe("Issue #5 concealed-data Attack", () => {
     expect(firstScan.ok).toBe(true);
     expect(secondScan.ok).toBe(true);
     if (!firstScan.ok || !secondScan.ok) return;
-    expect(firstScan.run.state).toBe("refused");
+    expect(firstScan.run.state).toBe("awaiting_repair_approval");
     expect(firstScan.run.scan?.findings).toEqual([
       { mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: 2 },
     ]);
@@ -200,7 +200,7 @@ describe("Issue #5 one-way Scope Assessment", () => {
     if (succeeds) {
       if (!scan.ok) return;
       expect(scan.run.scope_assessment?.status).toBe(status);
-      expect(scan.run.state).toBe("refused");
+      expect(scan.run.state).toBe("awaiting_repair_approval");
     } else {
       if (scan.ok) return;
       expect(scan.error.code).toBe(errorCode);
@@ -242,6 +242,33 @@ describe("Issue #5 local presentation boundary", () => {
         engine_version: "1.0.0",
         supported_profile: "accepted",
         findings: [{ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: 1 }],
+        repair_plan: {
+          version: "1",
+          operation: "repair_plan",
+          status: "eligible",
+          artifact_sha256: reference.sha256,
+          engine_version: "1.0.0",
+          dependency_analysis: {
+            visible_formulas: [],
+            defined_names: [],
+            data_validation: [],
+            tables: [],
+            charts: [],
+            pivots: [],
+            package_relationships: [],
+            macros: [],
+            external_connections: [],
+          },
+          actions: [{
+            kind: "delete_hidden_worksheet",
+            worksheet: "Hidden",
+            target_member: "xl/worksheets/sheet2.xml",
+            changed_members: ["[Content_Types].xml", "xl/_rels/workbook.xml.rels", "xl/workbook.xml", "xl/worksheets/sheet2.xml"],
+            capability_losses: ["Hidden worksheet content will be removed."],
+          }],
+          changed_members: ["[Content_Types].xml", "xl/_rels/workbook.xml.rels", "xl/workbook.xml", "xl/worksheets/sheet2.xml"],
+          capability_losses: ["Hidden worksheet content will be removed."],
+        },
       }),
       reveal: () => [{ worksheet: "Hidden", row: 1, values: ["local-only secret"] }],
       verify: () => {

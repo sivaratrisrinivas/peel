@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_SCRIPT = REPO_ROOT / "scripts" / "daytona_engine.py"
 INPUT_PATH = "/tmp/peel-input.xlsx"
 OUTPUT_PATH = "/tmp/peel-verified.xlsx"
+REPAIR_OUTPUT_PATH = "/tmp/peel-repaired.xlsx"
 MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
 
 
@@ -29,7 +30,7 @@ def _request() -> dict[str, Any]:
     operation = value.get("operation")
     artifact = value.get("artifact")
     encoded = value.get("bytes_base64")
-    if operation not in {"scan", "verify"} or not isinstance(artifact, dict) or not isinstance(encoded, str):
+    if operation not in {"scan", "repair", "verify"} or not isinstance(artifact, dict) or not isinstance(encoded, str):
         raise ValueError("invalid Daytona engine request")
     if not isinstance(artifact.get("filename"), str) or not artifact["filename"].lower().endswith(".xlsx"):
         raise ValueError("invalid artifact filename")
@@ -39,13 +40,23 @@ def _request() -> dict[str, Any]:
         raise ValueError("artifact is outside the supported size limit")
     if operation == "verify" and not isinstance(value.get("original_artifact_sha256"), str):
         raise ValueError("verify requires the original artifact identity")
+    if operation == "repair" and not isinstance(value.get("repair_plan"), dict):
+        raise ValueError("repair requires the complete Repair Plan")
     try:
         payload = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as error:
         raise ValueError("artifact is not valid base64") from error
     if len(payload) != artifact["byte_size"] or hashlib.sha256(payload).hexdigest() != artifact["sha256"]:
         raise ValueError("artifact identity failed before Daytona upload")
-    return {**value, "payload": payload}
+    original_payload = None
+    if isinstance(value.get("original_bytes_base64"), str):
+        try:
+            original_payload = base64.b64decode(value["original_bytes_base64"], validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("original artifact is not valid base64") from error
+        if not isinstance(value.get("original_artifact_sha256"), str) or hashlib.sha256(original_payload).hexdigest() != value["original_artifact_sha256"]:
+            raise ValueError("original artifact identity failed before Daytona upload")
+    return {**value, "payload": payload, "original_payload": original_payload}
 
 
 def _command(request: dict[str, Any]) -> str:
@@ -60,8 +71,14 @@ def _command(request: dict[str, Any]) -> str:
         "--artifact-sha256",
         request["artifact"]["sha256"],
     ]
-    if operation == "verify":
+    if operation == "repair":
+        command.extend(["--repair-plan", "/tmp/peel-repair-plan.json"])
+    elif operation == "verify":
         command.extend(["--original-artifact-sha256", request["original_artifact_sha256"]])
+        if request.get("original_payload") is not None:
+            command.extend(["--original-input", "/tmp/peel-original.xlsx"])
+        if isinstance(request.get("repair_plan"), dict):
+            command.extend(["--repair-plan", "/tmp/peel-repair-plan.json"])
     return " ".join(shlex.quote(part) for part in command)
 
 
@@ -92,6 +109,10 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         sandbox = client.create(params, timeout=120)
         payload = request["payload"]
         sandbox.fs.upload_file(payload, INPUT_PATH, timeout=120)
+        if request.get("original_payload") is not None:
+            sandbox.fs.upload_file(request["original_payload"], "/tmp/peel-original.xlsx", timeout=120)
+        if isinstance(request.get("repair_plan"), dict):
+            sandbox.fs.upload_file(json.dumps(request["repair_plan"], separators=(",", ":")).encode("utf-8"), "/tmp/peel-repair-plan.json", timeout=120)
         sandbox.fs.upload_file(ENGINE_SCRIPT.read_bytes(), "/tmp/peel-engine.py", timeout=120)
         result = sandbox.process.exec(_command(request), timeout=120)
         if result.exit_code != 0 or not isinstance(result.result, str):
@@ -99,15 +120,17 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         engine_result = json.loads(result.result)
         if not isinstance(engine_result, dict):
             raise RuntimeError("Daytona production engine returned invalid JSON")
-        if request["operation"] == "verify" and engine_result.get("status") == "verified":
-            downloaded = sandbox.fs.download_file(OUTPUT_PATH)
+        if request["operation"] in {"repair", "verify"} and engine_result.get("status") in {"repaired", "verified"}:
+            output_path = REPAIR_OUTPUT_PATH if request["operation"] == "repair" else OUTPUT_PATH
+            downloaded = sandbox.fs.download_file(output_path)
             if not isinstance(downloaded, bytes):
                 raise RuntimeError("Daytona returned an invalid declared artifact")
-            expected_hash = request["artifact"]["sha256"]
-            if len(downloaded) != request["artifact"]["byte_size"] or hashlib.sha256(downloaded).hexdigest() != expected_hash:
+            expected_hash = engine_result.get("artifact_sha256")
+            if not isinstance(expected_hash, str) or len(downloaded) > MAX_ARTIFACT_BYTES or hashlib.sha256(downloaded).hexdigest() != expected_hash:
                 raise RuntimeError("declared Daytona artifact failed its hash check")
-            if engine_result.get("artifact_sha256") != expected_hash:
-                raise RuntimeError("Daytona result identity does not match the declared artifact")
+            if request["operation"] == "verify" and expected_hash != request["artifact"]["sha256"]:
+                raise RuntimeError("Daytona result identity does not match the declared candidate")
+            return {"result": engine_result, "candidate_bytes_base64": base64.b64encode(downloaded).decode("ascii")} if request["operation"] == "repair" else {"result": engine_result}
         return {"result": engine_result}
     finally:
         if sandbox is not None:

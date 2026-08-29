@@ -48,12 +48,12 @@ Python engine in live mode. The runner supplies valid command identities and
 uses bounded Cerebras rate-limit backoff only before a tool action starts; a
 completed tool response is never replayed.
 
-Issue #5 adds the first read-only concealed-data journey. The deterministic
+Issue #5 adds the concealed-data Attack and one-way Scope Assessment. The
 hidden-worksheet Attack reports mechanism, location, and count as public Finding
-metadata, applies a one-way Scope Assessment, and ends the Run in visible
-`refused` state without exposing Repair or Disclosure. `mismatch`,
-`insufficient_context`, and model failure fail closed; `no_mismatch_found` is
-only an assessment result and never authorization. Without an explicitly
+metadata. `mismatch`, `insufficient_context`, and model failure fail closed;
+`no_mismatch_found` is only an assessment result and never authorization. An
+eligible Finding now enters the separate issue #6 Repair Approval boundary;
+unsupported or unproven Findings remain visible Refusals. Without an explicitly
 configured Scope Assessor, the daemon returns `insufficient_context` rather than
 silently treating a Finding as aligned.
 
@@ -64,12 +64,40 @@ Run-bound reference through the command response, and serves values only from
 `GET /v1/runs/<run-id>/reveals/<reference>`. Reveal values are not placed in
 TrueForge/MCP responses, SQLite, or persistent reports.
 
+## Issue #6 hidden-worksheet Repair journey
+
+The supported Repair scope is deliberately narrow: an unreferenced `hidden` or
+`veryHidden` worksheet in an accepted OOXML package. The engine emits one
+complete Repair Plan containing visible-formula, defined-name, data-validation,
+table, chart, pivot, package-relationship, macro, and external-connection
+dependency analysis, plus explicit capability losses. Any dependency,
+unsupported package member, macro, external connection, additional concealed
+mechanism, or unresolved worksheet relationship produces a Refusal.
+
+The native MCP `apply_repair` tool is the only Repair execution boundary. Its
+approval binds the Run, envelope revision, original artifact SHA-256, canonical
+Repair Plan SHA-256, and engine version. Approval expiry, restart, replay,
+revision mutation, and non-invocation leave the original Artifact Reference
+unchanged. An approved plan runs in a fresh Daytona sandbox in live mode and
+produces a new candidate; the deterministic fake engine covers the same
+contract in tests.
+
+The transformer edits only the planned workbook, relationship, content-type,
+and worksheet relationship members and preserves untouched ZIP member payloads
+byte-for-byte. Verification reruns the hidden-worksheet Attack, validates
+relationships and content types, checks the visible-content baseline, and
+reopens the candidate with the available readers. Any remaining Finding,
+unexplained member change, parse failure, or reopen failure destroys the
+candidate and ends the Run in Refusal. This issue does not repair hidden rows or
+columns, pivot caches, macros, external connections, or arbitrary unsupported
+OOXML extensions.
+
 ## Current status
 
 Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
 suspicious hidden worksheets, missing context, scope mismatch, model failure,
-private Reveal expiry, and visible refusal. The default path keeps Reveal off,
-and a refused Run has no Repair or Disclosure path.
+private Reveal expiry, and the handoff into Repair Approval. The default path
+keeps Reveal off, and a refused Run has no Repair or Disclosure path.
 
 Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
 TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with
@@ -116,7 +144,7 @@ The kernel exposes the same versioned command boundary to both HTTP and MCP:
 
 - `POST /v1/artifacts` registers a bounded `.xlsx` byte stream and returns an
   opaque Artifact Reference.
-- `POST /v1/commands` accepts `stage`, `scan`, `verify`,
+- `POST /v1/commands` accepts `stage`, `scan`, `apply_repair`, `verify`,
   `request_disclosure`, and `respond_disclosure` commands.
 - `GET /v1/runs/<run-id>` returns bounded Run metadata and evidence.
 - `POST /mcp` exposes the same commands through `initialize`, `tools/list`,
@@ -138,6 +166,8 @@ The safety rules are simple:
 
 - An Attack reports a Finding when its concealed-data mechanism is present.
 - A Repair creates a new artifact and needs separate Repair Approval.
+- A Repair Plan enumerates dependencies and declared capability losses before
+  any transformation is authorized.
 - Verification reruns the Attacks and checks the visible-content baseline.
 - Disclosure needs a separate approval bound to the exact artifact and recipient.
 - A denied Disclosure Attempt produces no SMTP activity.

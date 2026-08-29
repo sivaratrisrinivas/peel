@@ -6,6 +6,8 @@ export const REVEAL_TTL_MS = 60 * 1000;
 export type RunState =
   | "staged"
   | "scanned"
+  | "awaiting_repair_approval"
+  | "repairing"
   | "verified"
   | "awaiting_disclosure_approval"
   | "disclosing"
@@ -17,6 +19,7 @@ export type RunState =
 export type CommandName =
   | "stage"
   | "scan"
+  | "apply_repair"
   | "verify"
   | "request_disclosure"
   | "respond_disclosure";
@@ -66,6 +69,62 @@ export interface ScanCommand extends RunCommandBase {
   expected_state: "staged";
 }
 
+export interface RepairApprovalBinding {
+  run_id: string;
+  revision: number;
+  original_artifact_sha256: string;
+  repair_plan_sha256: string;
+  engine_version: string;
+}
+
+export interface RepairAction {
+  kind: "delete_hidden_worksheet";
+  worksheet: string;
+  target_member: string;
+  changed_members: string[];
+  capability_losses: string[];
+}
+
+export interface DependencyAnalysis {
+  visible_formulas: string[];
+  defined_names: string[];
+  data_validation: string[];
+  tables: string[];
+  charts: string[];
+  pivots: string[];
+  package_relationships: string[];
+  macros: string[];
+  external_connections: string[];
+}
+
+export interface RepairPlan {
+  version: typeof API_VERSION;
+  operation: "repair_plan";
+  status: "eligible" | "refused";
+  artifact_sha256: string;
+  engine_version: string;
+  dependency_analysis: DependencyAnalysis;
+  actions: RepairAction[];
+  changed_members: string[];
+  capability_losses: string[];
+  refusal_reasons?: string[];
+}
+
+export interface RepairApprovalView {
+  approval_id: string;
+  expires_at: string;
+  idempotency_key: string;
+  binding: RepairApprovalBinding;
+}
+
+export interface ApplyRepairCommand extends RunCommandBase {
+  command: "apply_repair";
+  expected_state: "awaiting_repair_approval";
+  approval_id: string;
+  idempotency_key: string;
+  binding: RepairApprovalBinding;
+}
+
 export interface VerifyCommand extends RunCommandBase {
   command: "verify";
   expected_state: "scanned";
@@ -100,6 +159,7 @@ export interface RespondDisclosureCommand extends RunCommandBase {
 export type Command =
   | StageCommand
   | ScanCommand
+  | ApplyRepairCommand
   | VerifyCommand
   | RequestDisclosureCommand
   | RespondDisclosureCommand;
@@ -162,6 +222,20 @@ export interface EngineScanResult {
   engine_version: string;
   supported_profile: "accepted" | "refused";
   findings: Finding[];
+  repair_plan?: RepairPlan;
+  refusal_code?: "unsupported_container" | "unsupported_content" | "integrity_failure";
+}
+
+export interface EngineRepairResult {
+  version: typeof API_VERSION;
+  operation: "repair";
+  status: "repaired" | "refused";
+  artifact_sha256: string;
+  original_artifact_sha256: string;
+  engine_version: string;
+  repair_plan_sha256: string;
+  changed_members: string[];
+  candidate_artifact?: ArtifactReference;
   refusal_code?: "unsupported_container" | "unsupported_content" | "integrity_failure";
 }
 
@@ -175,6 +249,11 @@ export interface EngineVerifyResult {
   artifact_unchanged: boolean;
   baseline_sha256: string;
   remaining_findings: Finding[];
+  relationships_valid?: boolean;
+  content_types_valid?: boolean;
+  reopened_with?: string[];
+  changed_members?: string[];
+  unexplained_changes?: string[];
   refusal_code?: "unsupported_container" | "unsupported_content" | "integrity_failure";
 }
 
@@ -211,11 +290,23 @@ export interface RunView {
   state: RunState;
   envelope_revision_hash: string;
   artifact: ArtifactReference;
+  original_artifact: ArtifactReference;
   scan?: ScanEvidence;
   scope_assessment?: ScopeAssessmentEvidence;
+  repair_plan?: RepairPlan;
+  repair?: RepairEvidence;
+  repair_approval?: RepairApprovalView;
   reveals?: RevealReference[];
   verification?: VerificationEvidence;
   delivery?: DeliveryEvidence;
+}
+
+export interface RepairEvidence {
+  original_artifact_sha256: string;
+  artifact_sha256: string;
+  repair_plan_sha256: string;
+  engine_version: string;
+  changed_members: string[];
 }
 
 export interface ApprovalView {
@@ -230,6 +321,7 @@ export interface SuccessResponse {
   ok: true;
   run: RunView;
   approval?: ApprovalView;
+  repair_approval?: RepairApprovalView;
   deduplicated?: boolean;
 }
 
@@ -252,11 +344,18 @@ export interface Clock {
 export interface ArtifactStore {
   put(bytes: Uint8Array, filename: string, ttlMs?: number): ArtifactReference;
   read(reference: ArtifactReference): Uint8Array;
+  discard?(reference: ArtifactReference): void;
 }
 
 export interface EngineAdapter {
   scan(reference: ArtifactReference): EngineScanResult;
-  verify(reference: ArtifactReference, originalArtifactSha256: string): EngineVerifyResult;
+  repair?(reference: ArtifactReference, plan: RepairPlan): EngineRepairResult;
+  verify(
+    reference: ArtifactReference,
+    originalArtifactSha256: string,
+    plan?: RepairPlan,
+    originalReference?: ArtifactReference,
+  ): EngineVerifyResult;
   reveal?(reference: ArtifactReference, finding: Finding): RevealRow[];
 }
 

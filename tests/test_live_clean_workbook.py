@@ -63,6 +63,49 @@ def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_pa
     ]
 
 
+def test_production_engine_repairs_only_approved_ooxml_members(tmp_path: Path) -> None:
+    source = tmp_path / "hidden.xlsx"
+    with zipfile.ZipFile(source, "w") as package:
+        package.writestr(
+            "[Content_Types].xml",
+            '<Types><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        )
+        package.writestr(
+            "xl/workbook.xml",
+            '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Visible" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="veryHidden" r:id="rId2"/></sheets></workbook>',
+        )
+        package.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>',
+        )
+        package.writestr("xl/worksheets/sheet1.xml", "<worksheet><sheetData/></worksheet>")
+        package.writestr("xl/worksheets/sheet2.xml", "<worksheet><sheetData><row><c>secret</c></row></sheetData></worksheet>")
+        package.writestr("xl/theme/theme1.xml", "<theme>untouched</theme>")
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+
+    scan = daytona_engine._scan_package(source, digest)
+    plan = scan["repair_plan"]
+    assert plan["status"] == "eligible"
+    repair = daytona_engine._repair_package(source, digest, plan)
+    candidate = Path(daytona_engine.REPAIR_OUTPUT_PATH)
+    candidate_digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assert repair["status"] == "repaired"
+    assert repair["artifact_sha256"] == candidate_digest
+    assert repair["changed_members"] == plan["changed_members"]
+
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(candidate) as repaired:
+        assert "xl/worksheets/sheet2.xml" not in repaired.namelist()
+        assert repaired.read("xl/worksheets/sheet1.xml") == original.read("xl/worksheets/sheet1.xml")
+        assert repaired.read("xl/theme/theme1.xml") == original.read("xl/theme/theme1.xml")
+
+    verified = daytona_engine._verify_package(candidate, candidate_digest, digest, source, plan)
+    assert verified["status"] == "verified"
+    assert verified["relationships_valid"] is True
+    assert verified["content_types_valid"] is True
+    assert verified["unexplained_changes"] == []
+
+
 def test_live_engine_cli_rejects_a_hash_mismatch_without_local_fallback(tmp_path: Path) -> None:
     source = tmp_path / "clean.xlsx"
     _workbook(source)
