@@ -118,9 +118,12 @@ for commit `0faa8bc`; no review findings were surfaced there. The WSL fake
 IMAP/public-boundary suite passes, while the owned-mailbox smoke command is
 fail-closed and still requires locally configured IMAP credentials before it
 can produce live evidence. The follow-up Qodo review on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459293770)
-identified restart rematerialization, bounded bridge and socket timeouts,
-shutdown ordering, and an IMAP recency-window bug. Those findings are fixed in
-the follow-up implementation commit; no findings were dismissed or deferred.
+identified and verified fixes for restart rematerialization, bounded bridge
+and socket timeouts, shutdown ordering, stale recency-window behavior, bounded
+UID scanning, mailbox-scoped cursors, repeated eligible-draft observation, and
+retry-safe fetch failures. The final update through implementation commit
+`af29db1` reports zero bugs, rule violations, or skill insights; no findings
+were dismissed or deferred.
 
 Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
 TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with
