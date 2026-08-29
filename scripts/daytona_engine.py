@@ -402,10 +402,11 @@ def _references_cells(
         end = _cell_info(f"{match.group(3) or match.group(1)}{match.group(4) or match.group(2)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
+    ordered_sheets = sheet_order or []
     if (
-        _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "cells")
-        or _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "columns")
-        or _three_dimensional_range_contains_targets(decoded, sheet, targets, sheet_order, "rows")
+        _three_dimensional_range_contains_targets(decoded, sheet, targets, ordered_sheets, "cells")
+        or _three_dimensional_range_contains_targets(decoded, sheet, targets, ordered_sheets, "columns")
+        or _three_dimensional_range_contains_targets(decoded, sheet, targets, ordered_sheets, "rows")
     ):
         return True
     qualified_column_pattern = re.compile(
@@ -631,7 +632,7 @@ def _build_repair_plan(
         ):
             reasons.append(f"The hidden worksheet {sheet['name']} has no resolvable package relationship.")
             continue
-        sheet_reasons: list[str] = []
+        hidden_sheet_reasons: list[str] = []
         visible_sheet_paths = {
             candidate["path"]
             for candidate in sheets
@@ -641,42 +642,42 @@ def _build_repair_plan(
             xml = payload.decode("utf-8", errors="strict") if member.endswith((".xml", ".rels")) else ""
             if member in visible_sheet_paths and _matching_element(xml, "f", sheet):
                 dependencies["visible_formulas"].append(member)
-                sheet_reasons.append(f"visible formula in {member}")
+                hidden_sheet_reasons.append(f"visible formula in {member}")
             if member == "xl/workbook.xml" and _matching_element(xml, "definedName", sheet):
                 dependencies["defined_names"].append(member)
-                sheet_reasons.append("defined name in xl/workbook.xml")
+                hidden_sheet_reasons.append("defined name in xl/workbook.xml")
             if member.startswith("xl/worksheets/") and member.endswith(".xml") and member != sheet["path"] and _matching_element(xml, "dataValidation", sheet):
                 dependencies["data_validation"].append(member)
-                sheet_reasons.append(f"data validation in {member}")
+                hidden_sheet_reasons.append(f"data validation in {member}")
             if member.startswith("xl/tables/") and member.endswith(".xml") and _contains_sheet_reference(xml, sheet):
                 dependencies["tables"].append(member)
-                sheet_reasons.append(f"table in {member}")
+                hidden_sheet_reasons.append(f"table in {member}")
             if (member.startswith("xl/charts/") or member.startswith("xl/drawings/")) and member.endswith(".xml") and _contains_sheet_reference(xml, sheet):
                 dependencies["charts"].append(member)
-                sheet_reasons.append(f"chart or drawing in {member}")
+                hidden_sheet_reasons.append(f"chart or drawing in {member}")
             if member.startswith("xl/pivot") and member.endswith(".xml") and _contains_sheet_reference(xml, sheet):
                 dependencies["pivots"].append(member)
-                sheet_reasons.append(f"pivot in {member}")
+                hidden_sheet_reasons.append(f"pivot in {member}")
         for relation in relationships:
             if relation["target"] == sheet["path"] and relation["source"] != "xl/workbook.xml":
                 dependencies["package_relationships"].append(relation["member"])
-                sheet_reasons.append(f"package relationship in {relation['member']}")
+                hidden_sheet_reasons.append(f"package relationship in {relation['member']}")
             if relation["source"] == sheet["path"]:
                 dependencies["package_relationships"].append(relation["member"])
                 relation_type = relation["type"].lower()
                 if "table" in relation_type:
                     dependencies["tables"].append(relation["target"])
-                    sheet_reasons.append(f"table relationship in {relation['member']}")
+                    hidden_sheet_reasons.append(f"table relationship in {relation['member']}")
                 elif "chart" in relation_type or "drawing" in relation_type:
                     dependencies["charts"].append(relation["target"])
-                    sheet_reasons.append(f"chart relationship in {relation['member']}")
+                    hidden_sheet_reasons.append(f"chart relationship in {relation['member']}")
                 elif "pivot" in relation_type:
                     dependencies["pivots"].append(relation["target"])
-                    sheet_reasons.append(f"pivot relationship in {relation['member']}")
+                    hidden_sheet_reasons.append(f"pivot relationship in {relation['member']}")
                 else:
-                    sheet_reasons.append(f"package relationship in {relation['member']}")
-        if sheet_reasons:
-            reasons.append(f"Hidden worksheet {sheet['name']} has dependencies: {', '.join(_unique(sheet_reasons))}.")
+                    hidden_sheet_reasons.append(f"package relationship in {relation['member']}")
+        if hidden_sheet_reasons:
+            reasons.append(f"Hidden worksheet {sheet['name']} has dependencies: {', '.join(_unique(hidden_sheet_reasons))}.")
         else:
             actions.append(_repair_action(sheet, files))
 
@@ -692,36 +693,36 @@ def _build_repair_plan(
         unresolved_count = unresolved_by_worksheet.get(sheet["path"], 0)
         if not cells and not unresolved_count:
             continue
-        sheet_reasons: list[str] = []
+        concealed_sheet_reasons: list[str] = []
         dependent_members: set[str] = set()
         if unresolved_count:
-            sheet_reasons.append(f"{unresolved_count} concealed value(s) without an exact cell reference")
+            concealed_sheet_reasons.append(f"{unresolved_count} concealed value(s) without an exact cell reference")
         shared_cell_references = _shared_string_cells(files[sheet["path"]].decode("utf-8"), cells)
         if shared_cell_references:
-            sheet_reasons.append("shared-string value in xl/sharedStrings.xml")
+            concealed_sheet_reasons.append("shared-string value in xl/sharedStrings.xml")
         for member, payload in files.items():
             xml = payload.decode("utf-8", errors="strict") if member.endswith((".xml", ".rels")) else ""
             related_to_sheet = member == sheet["path"] or _member_is_related_to_worksheet(member, sheet["path"], relationships)
             if member in visible_sheet_paths and _matching_elements_for_cells(xml, "f", sheet, cells, member, False, sheets):
                 dependencies["visible_formulas"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("visible formula in " + member)
+                concealed_sheet_reasons.append("visible formula in " + member)
             if member == "xl/workbook.xml" and _matching_elements_for_cells(
                 xml, "definedName", sheet, cells, sheet_order=sheets
             ):
                 dependencies["defined_names"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("defined name in xl/workbook.xml")
+                concealed_sheet_reasons.append("defined name in xl/workbook.xml")
             if member in visible_sheet_paths and _matching_elements_for_cells(xml, "dataValidation", sheet, cells, member, False, sheets):
                 dependencies["data_validation"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("data validation in " + member)
+                concealed_sheet_reasons.append("data validation in " + member)
             if member.startswith("xl/tables/") and member.endswith(".xml") and _references_cells(
                 xml, sheet, cells, sheet["path"] if related_to_sheet else None, False, sheets
             ):
                 dependencies["tables"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("table in " + member)
+                concealed_sheet_reasons.append("table in " + member)
             if (
                 (member.startswith("xl/charts/") or member.startswith("xl/drawings/"))
                 and member.endswith(".xml")
@@ -729,21 +730,21 @@ def _build_repair_plan(
             ):
                 dependencies["charts"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("chart or drawing in " + member)
+                concealed_sheet_reasons.append("chart or drawing in " + member)
             if member.startswith("xl/pivot") and member.endswith(".xml") and _references_cells(
                 xml, sheet, cells, sheet["path"] if related_to_sheet else None, False, sheets
             ):
                 dependencies["pivots"].append(member)
                 dependent_members.add(member)
-                sheet_reasons.append("pivot in " + member)
+                concealed_sheet_reasons.append("pivot in " + member)
         for dependent_member in dependent_members:
             for relation_member in _relationship_path_to_worksheet(dependent_member, sheet["path"], relationships) or []:
                 dependencies["package_relationships"].append(relation_member)
-                sheet_reasons.append("package relationship in " + relation_member)
-        if sheet_reasons:
+                concealed_sheet_reasons.append("package relationship in " + relation_member)
+        if concealed_sheet_reasons:
             reasons.append(
                 f"Concealed values in worksheet {sheet['name']} have dependencies: "
-                + ", ".join(_unique(sheet_reasons))
+                + ", ".join(_unique(concealed_sheet_reasons))
                 + "."
             )
         else:
@@ -930,7 +931,8 @@ def _clear_cell_values(xml: str, cells: list[str]) -> str:
         content = match.group(2)
         closing = match.group(3)
         attributes = re.search(rf"<{_local_element('c')}\b([^>]*)", opening or "", re.IGNORECASE)
-        reference = _cell_info(_xml_attribute(attributes.group(1), "r") or "")[0] if attributes else None
+        parsed_reference = _cell_info(_xml_attribute(attributes.group(1), "r") or "") if attributes else None
+        reference = parsed_reference[0] if parsed_reference else None
         if reference is None or reference not in targets:
             return match.group(0)
         if opening is None or content is None or closing is None:
