@@ -234,4 +234,10 @@ Environment names and defaults are in [`.env.example`](.env.example).
 
 The project is released under the [MIT License](LICENSE). It is engineered by Srinivas with Codex assistance. Sachin records and edits the demo only after `demo_ready`.
 
-The qualification implementation was reviewed in [PR #15](https://github.com/sivaratrisrinivas/peel/pull/15); its [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460580573) records the final status. Earlier slices are [#11](https://github.com/sivaratrisrinivas/peel/pull/11), [#12](https://github.com/sivaratrisrinivas/peel/pull/12), and [#13](https://github.com/sivaratrisrinivas/peel/pull/13).
+## Qodo Code Review Evidence
+
+Representative merged PR: [PR #15](https://github.com/sivaratrisrinivas/peel/pull/15), which contains the qualification, privacy, runbook, licensing, and submission-packaging work.
+
+Qodo surfaced ten findings during the review history. The team fixed the future-dated qualification claim and the unsupported optional-journey claim, tightened fail-closed workbook-reader handling, and added regression coverage for recipient-evidence binding, encoded and serialized privacy data, SQLite numeric values and field casing, and fixture hygiene. No Qodo finding was dismissed, deferred, or intentionally left unresolved.
+
+The [canonical Qodo review](https://github.com/sivaratrisrinivas/peel/pull/15#issuecomment-5460580573) records the completed review and its follow-up history through the final PR commit [`1cfc70c`](https://github.com/sivaratrisrinivas/peel/commit/1cfc70c198c07804b4d55a55448502adc29f2340), with `Bugs (0)`, `Rule violations (0)`, and `Skill insights (0)`. Earlier reviewed slices are [#11](https://github.com/sivaratrisrinivas/peel/pull/11), [#12](https://github.com/sivaratrisrinivas/peel/pull/12), and [#13](https://github.com/sivaratrisrinivas/peel/pull/13).
