@@ -85,6 +85,11 @@ until they have their own end-to-end evidence. Sensitive Reveal values and
 LibreOffice-dependent checks are also cuts. Reveal, when enabled, stays on the
 local boundary for 60 seconds and returns at most five rows.
 
+This profile needs no new package and no local LibreOffice install. The
+existing ZIP/XML checks and optional `openpyxl` reader are the supported
+verification path; findings still fail closed until a real ScopeAssessor is
+configured.
+
 Peel refuses macros, external connections, unknown content-bearing package
 members, malformed packages, unsupported extensions, and any result whose
 fidelity it cannot prove. It never claims that an arbitrary workbook is
