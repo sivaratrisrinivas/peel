@@ -208,6 +208,53 @@ def test_issue8_engine_resolves_middle_sheets_in_3d_formula_ranges(tmp_path: Pat
         assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
 
 
+def test_issue8_engine_resolves_3d_whole_ranges_for_first_middle_and_last_sheets(tmp_path: Path) -> None:
+    workbook = (
+        '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+        '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+        '<sheet name="Sheet2" sheetId="2" r:id="rId2"/>'
+        '<sheet name="Sheet3" sheetId="3" r:id="rId3"/>'
+        '</sheets></workbook>'
+    )
+    relationships = (
+        '<Relationships>'
+        '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+        '<Relationship Id="rId3" Target="worksheets/sheet3.xml"/>'
+        '</Relationships>'
+    )
+    for formula_index, formula in enumerate((
+        "SUM(Sheet1:Sheet3!A:A)",
+        "SUM('Sheet1:Sheet3'!A:A)",
+        "SUM(Sheet1:Sheet3!2:2)",
+        "SUM('Sheet1:Sheet3'!2:2)",
+    )):
+        for concealed_sheet in (1, 2, 3):
+            formula_sheet = 3 if concealed_sheet == 1 else 1
+            worksheets = {}
+            for sheet_number in (1, 2, 3):
+                rows = []
+                if sheet_number == formula_sheet:
+                    rows.append(f'<row r="1"><c r="A1"><f>{formula}</f></c></row>')
+                if sheet_number == concealed_sheet:
+                    rows.append('<row r="2" hidden="1"><c r="A2"><v>secret</v></c></row>')
+                worksheets[f"xl/worksheets/sheet{sheet_number}.xml"] = f'<worksheet><sheetData>{"".join(rows)}</sheetData></worksheet>'
+            source = _package(
+                worksheets["xl/worksheets/sheet1.xml"],
+                output=tmp_path / f"three-dimensional-whole-{formula_index}-{concealed_sheet}.xlsx",
+                workbook=workbook,
+                extras={
+                    "xl/_rels/workbook.xml.rels": relationships,
+                    "xl/worksheets/sheet2.xml": worksheets["xl/worksheets/sheet2.xml"],
+                    "xl/worksheets/sheet3.xml": worksheets["xl/worksheets/sheet3.xml"],
+                },
+            )
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            result = daytona_engine._scan_package(source, digest)
+            assert result["repair_plan"]["status"] == "refused"
+            assert f"xl/worksheets/sheet{formula_sheet}.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
+
+
 def test_issue8_engine_refuses_duplicate_attributes_and_out_of_grid_cells(tmp_path: Path) -> None:
     duplicate = _package(
         '<worksheet a="1" a="2"><sheetData/></worksheet>',

@@ -37,9 +37,16 @@ function concealedWorksheet(): string {
     "</sheetData></worksheet>";
 }
 
-function threeSheetWorkbook(formula: string): Uint8Array {
+function threeSheetWorkbook(formula: string, concealedSheet = 2, formulaSheet = 1): Uint8Array {
+  const worksheet = (sheetNumber: number) => {
+    const rows = [
+      sheetNumber === formulaSheet ? `<row r='1'><c r='A1'><f>${formula}</f></c></row>` : "",
+      sheetNumber === concealedSheet ? "<row r='2' hidden='1'><c r='A2'><v>secret</v></c></row>" : "",
+    ].join("");
+    return `<worksheet><sheetData>${rows}</sheetData></worksheet>`;
+  };
   return workbook(
-    `<worksheet><sheetData><row r='1'><c r='A1'><f>${formula}</f></c></row></sheetData></worksheet>`,
+    worksheet(1),
     {
       "xl/workbook.xml": text.encode(
         "<workbook><sheets>" +
@@ -56,9 +63,9 @@ function threeSheetWorkbook(formula: string): Uint8Array {
           "</Relationships>",
       ),
       "xl/worksheets/sheet2.xml": text.encode(
-        "<worksheet><sheetData><row r='2' hidden='1'><c r='A2'><v>secret</v></c></row></sheetData></worksheet>",
+        worksheet(2),
       ),
-      "xl/worksheets/sheet3.xml": text.encode("<worksheet><sheetData/></worksheet>"),
+      "xl/worksheets/sheet3.xml": text.encode(worksheet(3)),
     },
   );
 }
@@ -279,6 +286,21 @@ describe("Issue #8 dependency refusal", () => {
       if (result.ok) return;
       expect(result.error.code).toBe("repair_refused");
       expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain("xl/worksheets/sheet1.xml");
+    },
+  );
+
+  it.each(["SUM(Sheet1:Sheet3!A:A)", "SUM('Sheet1:Sheet3'!A:A)", "SUM(Sheet1:Sheet3!2:2)", "SUM('Sheet1:Sheet3'!2:2)"])(
+    "refuses concealed values in every sheet of a 3-D whole range (%s)",
+    async (formula) => {
+      for (const concealedSheet of [1, 2, 3]) {
+        const formulaSheet = concealedSheet === 1 ? 3 : 1;
+        const base = setup(threeSheetWorkbook(formula, concealedSheet, formulaSheet));
+        const result = await scan(base.daemon, base.artifact);
+        expect(result.ok).toBe(false);
+        if (result.ok) continue;
+        expect(result.error.code).toBe("repair_refused");
+        expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain(`xl/worksheets/sheet${formulaSheet}.xml`);
+      }
     },
   );
 

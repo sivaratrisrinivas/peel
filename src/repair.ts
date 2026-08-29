@@ -370,6 +370,26 @@ function referencesCells(
     const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
   }
+  const quotedThreeDimensionalColumnPattern = /'((?:[^']|'')+)'!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
+  for (const match of decoded.matchAll(quotedThreeDimensionalColumnPattern)) {
+    const names = (match[1] ?? "").split(":");
+    if (names.length === 2 && sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder) &&
+      columnRangeContainsTargets(targets, match[2]!, match[3]!)) return true;
+  }
+  const quotedThreeDimensionalRowPattern = /'((?:[^']|'')+)'!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
+  for (const match of decoded.matchAll(quotedThreeDimensionalRowPattern)) {
+    const names = (match[1] ?? "").split(":");
+    if (names.length === 2 && sheetInSpan(sheet, names[0]!, names[1]!, sheetOrder) &&
+      rowRangeContainsTargets(targets, match[2]!, match[3]!)) return true;
+  }
+  const threeDimensionalColumnPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
+  for (const match of decoded.matchAll(threeDimensionalColumnPattern)) {
+    if (sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder) && columnRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
+  }
+  const threeDimensionalRowPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([1-9][0-9]*):\$?([1-9][0-9]*)/gi;
+  for (const match of decoded.matchAll(threeDimensionalRowPattern)) {
+    if (sheetInSpan(sheet, match[1]!, match[2]!, sheetOrder) && rowRangeContainsTargets(targets, match[3]!, match[4]!)) return true;
+  }
   const qualifiedColumnPattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})/gi;
   for (const match of decoded.matchAll(qualifiedColumnPattern)) {
     if (sheetMatches(match) && columnRangeContainsTargets(targets, match[3]!, match[4]!)) return true;

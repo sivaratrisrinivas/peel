@@ -391,6 +391,34 @@ def _references_cells(
         end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
+    quoted_three_dimensional_column_pattern = re.compile(
+        r"'((?:[^']|'')+)'!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})", re.IGNORECASE
+    )
+    for match in quoted_three_dimensional_column_pattern.finditer(decoded):
+        names = (match.group(1) or "").split(":")
+        if len(names) == 2 and _sheet_in_span(sheet, names[0], names[1], sheet_order) and _column_range_contains_targets(targets, match.group(2), match.group(3)):
+            return True
+    quoted_three_dimensional_row_pattern = re.compile(
+        r"'((?:[^']|'')+)'!\$?([1-9][0-9]*):\$?([1-9][0-9]*)", re.IGNORECASE
+    )
+    for match in quoted_three_dimensional_row_pattern.finditer(decoded):
+        names = (match.group(1) or "").split(":")
+        if len(names) == 2 and _sheet_in_span(sheet, names[0], names[1], sheet_order) and _row_range_contains_targets(targets, match.group(2), match.group(3)):
+            return True
+    three_dimensional_column_pattern = re.compile(
+        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
+        re.IGNORECASE,
+    )
+    for match in three_dimensional_column_pattern.finditer(decoded):
+        if _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order) and _column_range_contains_targets(targets, match.group(3), match.group(4)):
+            return True
+    three_dimensional_row_pattern = re.compile(
+        r"([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
+        re.IGNORECASE,
+    )
+    for match in three_dimensional_row_pattern.finditer(decoded):
+        if _sheet_in_span(sheet, match.group(1), match.group(2), sheet_order) and _row_range_contains_targets(targets, match.group(3), match.group(4)):
+            return True
     qualified_column_pattern = re.compile(
         r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
         re.IGNORECASE,
