@@ -161,6 +161,19 @@ function xmlWellFormed(xml: string): boolean {
     if (stack.length === 0 ? text.trim().length > 0 : text.includes("<") || /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);)/i.test(text)) return false;
     const full = match[0] ?? "";
     const name = match[1]!.toLowerCase();
+    const body = full.slice(full.startsWith("</") ? 2 : 1, full.endsWith("/>") ? -2 : -1).trim();
+    const attributes = body.slice(match[1]!.length);
+    if (full.startsWith("</")) {
+      if (attributes.trim().length > 0) return false;
+    } else {
+      const attributePattern = /\s+([A-Za-z_][\w.:-]*)\s*=\s*("[^"]*"|'[^']*')/g;
+      let attributeCursor = 0;
+      for (const attribute of attributes.matchAll(attributePattern)) {
+        if (attributes.slice(attributeCursor, attribute.index).trim().length > 0) return false;
+        attributeCursor = (attribute.index ?? 0) + attribute[0].length;
+      }
+      if (attributes.slice(attributeCursor).trim().length > 0) return false;
+    }
     if (full.startsWith("</")) {
       if (stack.pop() !== name) return false;
     } else {
@@ -311,6 +324,22 @@ function referencesCells(
   const referencePattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
   for (const match of decoded.matchAll(referencePattern)) {
     if (!sheetMatches(match)) continue;
+    const start = cellInfo(`${match[3]}${match[4]}`);
+    const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  const quotedThreeDimensionalPattern = /'((?:[^']|'')+)'!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
+  for (const match of decoded.matchAll(quotedThreeDimensionalPattern)) {
+    const names = (match[1] ?? "").split(":");
+    if (!names.some((name) => name.replace(/''/g, "'").trim().toLowerCase() === sheet.name.toLowerCase())) continue;
+    const start = cellInfo(`${match[2]}${match[3]}`);
+    const end = cellInfo(`${match[4] ?? match[2]}${match[5] ?? match[3]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  const threeDimensionalPattern = /([A-Za-z_][\w .-]*)\s*:\s*([A-Za-z_][\w .-]*)!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
+  for (const match of decoded.matchAll(threeDimensionalPattern)) {
+    const names = [match[1], match[2]];
+    if (!names.some((name) => name?.trim().toLowerCase() === sheet.name.toLowerCase())) continue;
     const start = cellInfo(`${match[3]}${match[4]}`);
     const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
     if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
@@ -857,6 +886,21 @@ function changedMembers(original: Record<string, Uint8Array>, candidate: Record<
   ]);
 }
 
+function approvedWorksheetChangesMatch(
+  original: Record<string, Uint8Array>,
+  candidate: Record<string, Uint8Array>,
+  plan?: RepairPlan,
+): boolean {
+  for (const action of plan?.actions ?? []) {
+    if (action.kind !== "clear_hidden_cell_values") continue;
+    const originalXml = original[action.target_member];
+    const candidateXml = candidate[action.target_member];
+    if (!originalXml || !candidateXml) return false;
+    if (decoder.decode(candidateXml) !== clearCellValues(decoder.decode(originalXml), action.cell_references)) return false;
+  }
+  return true;
+}
+
 export function verifyWorkbook(
   candidateBytes: Uint8Array,
   originalBytes: Uint8Array,
@@ -878,7 +922,8 @@ export function verifyWorkbook(
     const changedMembersMatch = plan
       ? canonicalJson(actualChanges) === canonicalJson(plan.changed_members)
       : true;
-    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch;
+    const approvedContentsMatch = approvedWorksheetChangesMatch(original.files, candidate.files, plan);
+    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch && approvedContentsMatch;
     const result: EngineVerifyResult = {
       version: "1",
       operation: "verify",

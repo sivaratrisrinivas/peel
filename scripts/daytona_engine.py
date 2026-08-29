@@ -1011,6 +1011,23 @@ def _changed_members(original: dict[str, bytes], candidate: dict[str, bytes]) ->
     )
 
 
+def _approved_worksheet_changes_match(
+    original: dict[str, bytes], candidate: dict[str, bytes], plan: dict[str, Any] | None
+) -> bool:
+    for action in (plan or {}).get("actions", []):
+        if action.get("kind") != "clear_hidden_cell_values":
+            continue
+        target = action.get("target_member")
+        if not isinstance(target, str) or target not in original or target not in candidate:
+            return False
+        expected = _clear_cell_values(
+            original[target].decode("utf-8"), action.get("cell_references", [])
+        ).encode("utf-8")
+        if candidate[target] != expected:
+            return False
+    return True
+
+
 def _verify_package(
     path: Path,
     artifact_sha256: str,
@@ -1028,6 +1045,9 @@ def _verify_package(
     changed_members = _changed_members(original_inspection["files"], candidate_inspection["files"])
     allowed = set((plan or {}).get("changed_members", []))
     unexplained = sorted(set(changed_members) - allowed)
+    approved_contents_match = _approved_worksheet_changes_match(
+        original_inspection["files"], candidate_inspection["files"], plan
+    )
     changed_members_match = not plan or changed_members == sorted(plan.get("changed_members", []))
     identity_ok = artifact_sha256 != original_artifact_sha256 if plan else artifact_sha256 == original_artifact_sha256
     verified = bool(
@@ -1038,6 +1058,7 @@ def _verify_package(
         and reopened_with
         and unchanged
         and not unexplained
+        and approved_contents_match
         and changed_members_match
         and identity_ok
     )
