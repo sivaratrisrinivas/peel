@@ -165,12 +165,11 @@ enabled Attack, checks the visible workbook content, and reopens the candidate.
 Malformed or otherwise unprovable packages are refused before Repair.
 
 Qodo reviewed [PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
-through final commit `5b3fed2` and reported zero bugs, rule violations, and
-skill insights. The review found issues in shared-string handling, whole-range
-and 3-D references, missing cell references, malformed XML, runtime
-validation, duplicate attributes, grid bounds, defined-name scope, and mixed
-repair scope. The fixes are covered by tests. No findings were dismissed or
-deferred.
+and reported zero bugs, rule violations, and skill insights. The review found
+issues in shared-string handling, whole-range and 3-D references, missing cell
+references, malformed XML, runtime validation, duplicate attributes, grid
+bounds, defined-name scope, and mixed repair scope. The fixes are covered by
+tests. No findings were dismissed or deferred.
 
 ## Current status
 
