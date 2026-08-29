@@ -16,6 +16,10 @@ The two core journeys in scope are:
    the complete dependency analysis is empty, the atomic plan is approved, and
    Verification proves the supported visible baseline.
 
+The completed and verified Gmail Mailbox Trigger from issue #7 is an optional
+intake route. It is not required for the core qualification and can be used
+when polling is available; the manual trigger remains the fallback.
+
 The following are explicit cuts for this submission:
 
 - Hidden rows or columns: optional issue #8 remains open.

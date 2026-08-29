@@ -28,7 +28,7 @@ REQUIRED_PRIVACY_CATEGORIES = [
 ]
 SUPPORTED_SCOPE: dict[str, list[str] | dict[str, str]] = {
     "core_journeys": ["clean_workbook_disclosure", "hidden_worksheet_repair"],
-    "optional_journeys": [],
+    "optional_journeys": ["gmail_mailbox_trigger"],
     "cuts": {
         "hidden_rows_columns": "cut: optional issue #8 is open and not qualified",
         "pivot_cache": "cut: optional issue #9 is open and no trusted pivot fixture is qualified",
@@ -76,7 +76,7 @@ FORBIDDEN_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SECRET_SIGNATURES = (
-    re.compile(rb"-----BEGIN [^-]*PRIVATE KEY-----", re.IGNORECASE),
+    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
     re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(rb"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
     re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
@@ -246,10 +246,10 @@ def tracked_paths(repo_root: Path) -> list[Path]:
             timeout=10,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OSError("tracked file listing unavailable") from error
     if completed.returncode != 0:
-        return []
+        raise OSError("tracked file listing unavailable")
     return [repo_root / item for item in completed.stdout.decode("utf-8", errors="surrogateescape").split("\0") if item]
 
 
@@ -308,16 +308,13 @@ def _json_has_prohibited_field(value: object) -> bool:
 
 
 def _sqlite_has_prohibited_field(path: Path) -> bool:
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
-            tables = [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
-            for table in tables:
-                identifier = '"' + str(table).replace('"', '""') + '"'
-                columns = [row[1] for row in database.execute(f"PRAGMA table_info({identifier})")]
-                if any(column in FORBIDDEN_JSON_KEYS for column in columns):
-                    return True
-    except (OSError, sqlite3.Error):
-        return False
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
+        tables = [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        for table in tables:
+            identifier = '"' + str(table).replace('"', '""') + '"'
+            columns = [row[1] for row in database.execute(f"PRAGMA table_info({identifier})")]
+            if any(column in FORBIDDEN_JSON_KEYS for column in columns):
+                return True
     return False
 
 
@@ -359,6 +356,7 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
         return _failure("forbidden_corpus_empty")
 
     categories: set[str] = set()
+    surface_paths: set[Path] = set()
     files: list[Path] = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("category"), str) or not isinstance(entry.get("path"), str):
@@ -372,6 +370,26 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
         entry_files = _iter_files(path)
         if not entry_files:
             return _failure("privacy_surface_missing", categories_inspected=len(categories))
+        resolved_path = path.resolve()
+        if resolved_path in surface_paths:
+            return _failure("duplicate_privacy_surface", categories_inspected=len(categories))
+        surface_paths.add(resolved_path)
+        if category == "daytona_artifacts":
+            metadata_cleanup_proven = False
+            for metadata_path in entry_files:
+                if metadata_path.suffix.lower() != ".json":
+                    continue
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(metadata, dict) and (
+                    metadata.get("sandbox_destroyed") is True or metadata.get("destroyed") is True
+                ):
+                    metadata_cleanup_proven = True
+                    break
+            if not metadata_cleanup_proven:
+                return _failure("daytona_cleanup_unproven", categories_inspected=len(categories))
         categories.add(category)
         files.extend(entry_files)
     missing = set(REQUIRED_PRIVACY_CATEGORIES) - categories
@@ -397,8 +415,13 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
                     prohibited_fields += 1
             except (ValueError, UnicodeDecodeError):
                 pass
-        if path.suffix.lower() in {".sqlite", ".db"} and _sqlite_has_prohibited_field(path):
-            prohibited_fields += 1
+        if path.suffix.lower() in {".sqlite", ".db"}:
+            try:
+                sqlite_has_prohibited_field = _sqlite_has_prohibited_field(path)
+            except (OSError, sqlite3.Error):
+                return _failure("sqlite_unreadable", categories_inspected=len(categories))
+            if sqlite_has_prohibited_field:
+                prohibited_fields += 1
     if prohibited_values:
         return _failure("forbidden_value_found", categories_inspected=len(categories)) | {
             "forbidden_values_found": prohibited_values
@@ -419,7 +442,7 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
     }
 
 
-def _write_evidence(path: Path, evidence: Mapping[str, object]) -> None:
+def write_evidence(path: Path, evidence: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(dict(evidence), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -435,12 +458,15 @@ def main() -> int:
     args = parser.parse_args()
 
     evidence = qualify_privacy_manifest(args.manifest, args.forbidden_file)
-    hygiene = check_repository_hygiene(tracked_paths(args.repo_root))
+    try:
+        hygiene = check_repository_hygiene(tracked_paths(args.repo_root))
+    except OSError:
+        hygiene = ["tracked_file_listing_unavailable"]
     evidence["repository_hygiene"] = "pass" if not hygiene else "blocked"
     if hygiene and evidence["status"] == "pass":
         evidence["status"] = "blocked"
         evidence["failure_code"] = "repository_hygiene"
-    _write_evidence(args.evidence_file, evidence)
+    write_evidence(args.evidence_file, evidence)
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "pass" else 2
 

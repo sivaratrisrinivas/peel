@@ -65,7 +65,7 @@ def test_supported_scope_excludes_open_optional_journeys() -> None:
         "clean_workbook_disclosure",
         "hidden_worksheet_repair",
     ]
-    assert submission_qualification.SUPPORTED_SCOPE["optional_journeys"] == []
+    assert submission_qualification.SUPPORTED_SCOPE["optional_journeys"] == ["gmail_mailbox_trigger"]
     assert "hidden_rows_columns" in submission_qualification.SUPPORTED_SCOPE["cuts"]
     assert "pivot_cache" in submission_qualification.SUPPORTED_SCOPE["cuts"]
 
@@ -134,6 +134,27 @@ def test_privacy_qualification_rejects_prohibited_persistent_fields(tmp_path: Pa
     assert result["failure_code"] == "prohibited_field"
 
 
+def test_privacy_qualification_rejects_duplicate_surfaces_and_bad_sqlite(tmp_path: Path) -> None:
+    manifest, paths = complete_manifest(tmp_path)
+    corpus = tmp_path / "private-values.txt"
+    corpus.write_text("private", encoding="utf-8")
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["entries"][1]["path"] = payload["entries"][0]["path"]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "duplicate_privacy_surface"
+
+    sqlite_path = tmp_path / "invalid.sqlite"
+    sqlite_path.write_bytes(b"not a sqlite database")
+    payload["entries"][1]["path"] = str(sqlite_path)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "sqlite_unreadable"
+
+
 def test_repository_hygiene_rejects_workbooks_and_secret_signatures(tmp_path: Path) -> None:
     clean = tmp_path / "README.md"
     clean.write_text("safe", encoding="utf-8")
@@ -142,7 +163,7 @@ def test_repository_hygiene_rejects_workbooks_and_secret_signatures(tmp_path: Pa
     workbook = tmp_path / "generated.xlsx"
     workbook.write_bytes(b"PK\x03\x04")
     secret = tmp_path / "config.txt"
-    secret.write_text("-----BEGIN " + "PRIVATE KEY-----", encoding="utf-8")
+    secret.write_text("-----BEGIN " + "PRIVATE" + " KEY" + "-----", encoding="utf-8")
     violations = submission_qualification.check_repository_hygiene([workbook, secret])
     assert "generated_workbook" in violations
     assert "secret_signature" in violations

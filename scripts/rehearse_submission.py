@@ -14,14 +14,7 @@ from typing import Any
 if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.submission_qualification import qualify_rehearsals, repository_snapshot
-
-
-def _write_evidence(path: Path, evidence: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+from scripts.submission_qualification import qualify_rehearsals, repository_snapshot, write_evidence
 
 
 def _read_evidence(path: Path) -> dict[str, Any]:
@@ -63,7 +56,7 @@ def _run_rehearsal(repo_root: Path, evidence_path: Path, args: argparse.Namespac
     return completed.returncode
 
 
-def run(args: argparse.Namespace) -> int:
+def run_rehearsals(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve()
     evidence_dir = Path(args.evidence_dir).resolve()
     output_path = Path(args.evidence_file).resolve()
@@ -77,7 +70,7 @@ def run(args: argparse.Namespace) -> int:
             "configuration_unchanged": False,
             "failure_code": "qualification_output_must_be_outside_repository",
         }
-        _write_evidence(output_path, evidence)
+        write_evidence(output_path, evidence)
         print(json.dumps(evidence, sort_keys=True))
         return 2
 
@@ -92,7 +85,7 @@ def run(args: argparse.Namespace) -> int:
             "configuration_unchanged": False,
             "failure_code": "qualification_requires_clean_worktree",
         }
-        _write_evidence(output_path, evidence)
+        write_evidence(output_path, evidence)
         print(json.dumps(evidence, sort_keys=True))
         return 2
 
@@ -100,15 +93,29 @@ def run(args: argparse.Namespace) -> int:
     records: list[dict[str, Any]] = []
     for index in (1, 2):
         evidence_path = evidence_dir / f"rehearsal-{index}.json"
-        if _run_rehearsal(repo_root, evidence_path, args) != 0:
-            break
-        records.append(_read_evidence(evidence_path))
+        return_code = _run_rehearsal(repo_root, evidence_path, args)
+        record = _read_evidence(evidence_path)
+        records.append(record)
         snapshots.append(repository_snapshot(repo_root))
+        if return_code != 0:
+            failure_code = record.get("failure_code")
+            result = {
+                "schema_version": "1",
+                "probe": "submission_rehearsal",
+                "status": "blocked",
+                "rehearsals_completed": 0,
+                "code_unchanged": False,
+                "configuration_unchanged": False,
+                "failure_code": failure_code if isinstance(failure_code, str) and failure_code else "live_rehearsal_failed",
+            }
+            write_evidence(output_path, result)
+            print(json.dumps(result, sort_keys=True))
+            return 2
         if snapshots[-1] != snapshots[0]:
             break
 
     result = qualify_rehearsals(records, snapshots if len(snapshots) == 3 else [])
-    _write_evidence(output_path, result)
+    write_evidence(output_path, result)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "demo_ready" else 2
 
@@ -122,7 +129,7 @@ def main() -> int:
     parser.add_argument("--trueforge-url", default=os.environ.get("PEEL_TRUEFORGE_URL", "http://localhost:8790"))
     parser.add_argument("--daemon-port", default=int(os.environ.get("PEEL_LIVE_DAEMON_PORT", "8787")), type=int)
     parser.add_argument("--timeout", default=900, type=int)
-    return run(parser.parse_args())
+    return run_rehearsals(parser.parse_args())
 
 
 if __name__ == "__main__":

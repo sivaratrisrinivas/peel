@@ -12,9 +12,11 @@ This repository packages the two core journeys in scope for the hackathon:
 - An unreferenced hidden worksheet produces a Finding and, when dependency
   analysis proves it safe, one atomic Repair Plan followed by Verification.
 
-Optional hidden rows or columns and pivot-cache journeys are cuts. Issue [#8]
-and issue [#9] remain open, so they are not included in the supported scope or
-the demonstration. Sensitive Reveal values are also cut; only metadata and an
+The completed and verified Gmail Mailbox Trigger from issue [#7] is an optional
+supported intake route; the manual trigger remains the fallback. Optional
+hidden rows or columns and pivot-cache journeys are cuts. Issue [#8] and issue
+[#9] remain open, so they are not included in the supported scope or the
+demonstration. Sensitive Reveal values are also cut; only metadata and an
 ephemeral, local Reveal Reference are supported.
 
 ## Supported scope
