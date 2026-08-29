@@ -162,6 +162,14 @@ enabled Attack and normalizes only the approved concealed values when proving
 visible workbook fidelity. Malformed or otherwise unprovable packages refuse
 before Repair.
 
+The [Qodo review for PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
+was followed through implementation commit `a29aee9`. Its final report is clean:
+zero bugs, rule violations, or skill insights. The review findings on shared
+strings, whole ranges, reference-less cells, malformed XML, runtime cell
+references, 3-D ranges, duplicate attributes, worksheet grid limits, and
+defined-name scope were fixed and covered by tests. No findings were dismissed
+or deferred.
+
 ## Current status
 
 Issue #5 is complete. Its public-boundary tests cover legitimate-looking and
