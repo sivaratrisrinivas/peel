@@ -186,6 +186,15 @@ def test_privacy_qualification_rejects_mixed_case_sqlite_prohibited_fields(tmp_p
 
     with sqlite3.connect(sqlite_path) as database:
         database.execute("DROP TABLE records")
+        database.execute("CREATE TABLE records (count INTEGER, ratio REAL)")
+        database.execute("INSERT INTO records VALUES (?, ?)", (246802, 3.14))
+    corpus.write_text("246802\n3.14", encoding="utf-8")
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "forbidden_value_found"
+
+    with sqlite3.connect(sqlite_path) as database:
+        database.execute("DROP TABLE records")
         database.execute("CREATE TABLE records (payload TEXT)")
         database.execute(
             "INSERT INTO records VALUES (?)",

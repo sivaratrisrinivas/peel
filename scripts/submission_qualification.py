@@ -404,24 +404,34 @@ def _json_contains_prohibited_value(value: object, needles: Sequence[bytes], *, 
     return False
 
 
-def _sqlite_has_prohibited_field(path: Path, needles: Sequence[bytes]) -> bool:
+def _sqlite_inspection(path: Path, needles: Sequence[bytes]) -> tuple[bool, bool]:
+    prohibited_field = False
+    prohibited_value = False
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as database:
         tables = [row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
         for table in tables:
             identifier = '"' + str(table).replace('"', '""') + '"'
             columns = [row[1] for row in database.execute(f"PRAGMA table_info({identifier})")]
             if any(str(column).casefold() in FORBIDDEN_JSON_KEYS_CASEFOLD for column in columns):
-                return True
+                prohibited_field = True
             for row in database.execute(f"SELECT * FROM {identifier}"):
                 for value in row:
-                    serialized = value if isinstance(value, bytes) else value.encode("utf-8") if isinstance(value, str) else None
+                    serialized = (
+                        value
+                        if isinstance(value, bytes)
+                        else value.encode("utf-8")
+                        if isinstance(value, str)
+                        else str(value).encode("utf-8")
+                        if isinstance(value, (int, float))
+                        else None
+                    )
                     if serialized is None:
                         continue
                     if _serialized_value_contains_needle(serialized, needles):
-                        return True
+                        prohibited_value = True
                     if any(_json_has_prohibited_field(item) for item in _serialized_json_payloads(serialized)):
-                        return True
-    return False
+                        prohibited_field = True
+    return prohibited_field, prohibited_value
 
 
 def _contains_needle(data: bytes, needles: Sequence[bytes]) -> bool:
@@ -531,13 +541,15 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
                 pass
         if path.suffix.lower() in {".sqlite", ".db"}:
             try:
-                sqlite_has_prohibited_field = _sqlite_has_prohibited_field(path, needles)
+                sqlite_has_prohibited_field, sqlite_has_prohibited_value = _sqlite_inspection(path, needles)
             except _SerializedInspectionLimit:
                 return _failure("privacy_surface_too_complex", categories_inspected=len(categories))
             except (OSError, sqlite3.Error):
                 return _failure("sqlite_unreadable", categories_inspected=len(categories))
             if sqlite_has_prohibited_field:
                 prohibited_fields += 1
+            if sqlite_has_prohibited_value:
+                prohibited_values += 1
     if prohibited_values:
         return _failure("forbidden_value_found", categories_inspected=len(categories)) | {
             "forbidden_values_found": prohibited_values
