@@ -163,7 +163,7 @@ visible workbook fidelity. Malformed or otherwise unprovable packages refuse
 before Repair.
 
 The [Qodo review for PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
-was followed through implementation commit `db909fe`. Its final report is clean:
+was followed through implementation commit `10bf668`. Its final report is clean:
 zero bugs, rule violations, or skill insights. The review findings on shared
 strings, whole ranges, reference-less cells, malformed XML, runtime cell
 references, 3-D ranges, duplicate attributes, worksheet grid limits, and
