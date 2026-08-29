@@ -152,7 +152,7 @@ def test_mail_retrieval_scans_past_newer_ineligible_drafts(monkeypatch) -> None:
                 return "OK", [b" ".join(str(uid).encode() for uid in range(1, 102))]
             assert operation == "fetch"
             self.fetch_count += 1
-            raw = eligible.as_bytes() if message_id == b"1" else ineligible.as_bytes()
+            raw = eligible.as_bytes() if message_id == "1" else ineligible.as_bytes()
             return "OK", [(b"RFC822", raw)]
 
     fake = FakeImap()
@@ -163,6 +163,67 @@ def test_mail_retrieval_scans_past_newer_ineligible_drafts(monkeypatch) -> None:
     assert draft is not None
     assert draft.message_uid == "1"
     assert fake.fetch_count == 101
+
+
+def test_mail_retrieval_batches_uids_and_wraps_with_a_persistent_cursor(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+    monkeypatch.setenv("IMAP_USERNAME", "sender@example.com")
+    monkeypatch.setenv("IMAP_PASSWORD", "password")
+    monkeypatch.setenv("PEEL_OWNED_RECIPIENT", "owned@example.com")
+    eligible = EmailMessage()
+    eligible["From"] = "sender@example.com"
+    eligible["To"] = "owned@example.com"
+    eligible["Subject"] = "Old eligible workbook"
+    eligible.set_content("Intended disclosure: visible workbook only.")
+    eligible.add_attachment(b"xlsx", maintype="application", subtype="octet-stream", filename="old.xlsx")
+
+    ineligible = EmailMessage()
+    ineligible["From"] = "sender@example.com"
+    ineligible["To"] = "owned@example.com"
+    ineligible["Subject"] = "Half-authored draft"
+    ineligible.set_content("Still writing.")
+
+    class FakeImap:
+        fetch_counts: list[int] = []
+
+        def __enter__(self):
+            self.fetch_counts.append(0)
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def login(self, _username, _password):
+            return "OK", []
+
+        def select(self, _mailbox, readonly=True):
+            assert readonly is True
+            return "OK", []
+
+        def response(self, name):
+            assert name == "UIDVALIDITY"
+            return "OK", [b"uidvalidity-1"]
+
+        def uid(self, operation, message_id, query=None):
+            if operation == "search":
+                return "OK", [b"1 2 3 4 5"]
+            assert operation == "fetch"
+            self.fetch_counts[-1] += 1
+            raw = eligible.as_bytes() if message_id == "1" else ineligible.as_bytes()
+            return "OK", [(b"RFC822", raw)]
+
+    fake = FakeImap()
+    monkeypatch.setattr(mail_gate_probe.imaplib, "IMAP4_SSL", lambda *_args, **_kwargs: fake)
+    cursor = tmp_path / "mailbox-cursor.json"
+
+    assert mail_gate_probe._retrieve_eligible_draft(max_messages=2, cursor_path=cursor) is None
+    assert mail_gate_probe._retrieve_eligible_draft(max_messages=2, cursor_path=cursor) is None
+    found = mail_gate_probe._retrieve_eligible_draft(max_messages=2, cursor_path=cursor)
+
+    assert found is not None
+    assert found.message_uid == "1"
+    assert fake.fetch_counts == [4, 4, 2]
+    assert json.loads(cursor.read_text(encoding="utf-8"))["folder_uidvalidity"] == "uidvalidity-1"
 
 
 def test_mail_retrieval_configures_an_imap_socket_timeout(monkeypatch) -> None:
