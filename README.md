@@ -108,6 +108,13 @@ suspicious hidden worksheets, missing context, scope mismatch, model failure,
 private Reveal expiry, and visible refusal. The default path keeps Reveal off,
 and a refused Run has no Repair or Disclosure path.
 
+Issue #7 is implemented as an optional Gmail/IMAP Mailbox Trigger. Its initial
+Qodo review summary is published on [PR #12](https://github.com/sivaratrisrinivas/peel/pull/12#issuecomment-5459264401)
+for commit `0faa8bc`; no review findings were surfaced there. The WSL fake
+IMAP/public-boundary suite passes, while the owned-mailbox smoke command is
+fail-closed and still requires locally configured IMAP credentials before it
+can produce live evidence.
+
 Issue #4 is complete. The WSL live journey passed on 2026-08-29 with the
 TrueForge 0.1.4 Cerebras runtime, fresh Daytona execution, native denial with
 zero SMTP activity, fresh approval, and one matching owned-recipient message.
