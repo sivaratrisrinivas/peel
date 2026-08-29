@@ -413,26 +413,57 @@ function sharedStringValues(files: Record<string, Uint8Array>): string[] {
   const sharedStrings = files["xl/sharedStrings.xml"];
   if (!sharedStrings) return [];
   const xml = new TextDecoder().decode(sharedStrings);
-  return Array.from(xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/gi), (match) => (
-    Array.from(match[1]!.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/gi), (text) => decodeXml(text[1]!)).join("")
+  return Array.from(xml.matchAll(new RegExp("<" + localElement("si") + "\\b[^>]*>([\\s\\S]*?)</" + localElement("si") + ">", "gi")), (match) => (
+    Array.from(match[1]!.matchAll(new RegExp("<" + localElement("t") + "\\b[^>]*>([\\s\\S]*?)</" + localElement("t") + ">", "gi")), (text) => decodeXml(text[1]!)).join("")
   ));
 }
 
-function rowValues(rowXml: string, sharedStrings: readonly string[]): string[] {
-  return Array.from(rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/gi), (match) => {
+function columnNumber(column: string): number {
+  let result = 0;
+  for (const character of column.toUpperCase()) result = result * 26 + character.charCodeAt(0) - 64;
+  return result;
+}
+
+function cellColumn(reference: string): number | undefined {
+  const match = reference.match(/^[A-Z]{1,3}/i);
+  return match ? columnNumber(match[0]) : undefined;
+}
+
+function hiddenColumnRanges(xml: string): Array<[number, number]> {
+  return Array.from(xml.matchAll(new RegExp("<" + localElement("col") + "\\b([^>]*)\\/?>(?:</" + localElement("col") + ">)?", "gi")))
+    .filter((match) => /(?:^|\s)hidden=["'](?:1|true)["']/i.test(match[1] ?? ""))
+    .flatMap((match) => {
+      const minimum = Number(xmlAttribute(match[1] ?? "", "min"));
+      const maximum = Number(xmlAttribute(match[1] ?? "", "max"));
+      return Number.isSafeInteger(minimum) && Number.isSafeInteger(maximum) && minimum > 0 && maximum >= minimum
+        ? [[minimum, maximum] as [number, number]]
+        : [];
+    });
+}
+
+function rowValues(
+  rowXml: string,
+  sharedStrings: readonly string[],
+  hiddenColumns?: readonly [number, number][],
+): string[] {
+  return Array.from(rowXml.matchAll(new RegExp("<" + localElement("c") + "\\b([^>]*)>([\\s\\S]*?)</" + localElement("c") + ">", "gi")), (match) => {
     const attributes = match[1]!;
     const content = match[2]!;
+    if (hiddenColumns) {
+      const column = cellColumn(xmlAttribute(attributes, "r") ?? "");
+      if (column === undefined || !hiddenColumns.some(([minimum, maximum]) => column >= minimum && column <= maximum)) return undefined;
+    }
     const type = xmlAttribute(attributes, "t");
     if (type?.toLowerCase() === "inlinestr") {
-      return decodeXml(content.match(/<t\b[^>]*>([\s\S]*?)<\/t>/i)?.[1] ?? "");
+      return decodeXml(content.match(new RegExp("<" + localElement("t") + "\\b[^>]*>([\\s\\S]*?)</" + localElement("t") + ">", "i"))?.[1] ?? "");
     }
-    const value = decodeXml(content.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? "");
+    const value = decodeXml(content.match(new RegExp("<" + localElement("v") + "\\b[^>]*>([\\s\\S]*?)</" + localElement("v") + ">", "i"))?.[1] ?? "");
     if (type?.toLowerCase() === "s") {
       const index = Number(value);
       return Number.isSafeInteger(index) && sharedStrings[index] !== undefined ? sharedStrings[index]! : value;
     }
     return value;
-  });
+  }).filter((value): value is string => value !== undefined);
 }
 
 function rowsFromWorksheet(
@@ -443,13 +474,17 @@ function rowsFromWorksheet(
   maxRows: number,
 ): RevealRow[] {
   const rows: RevealRow[] = [];
-  for (const match of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/gi)) {
+  const columns = hiddenOnly ? hiddenColumnRanges(xml) : [];
+  for (const match of xml.matchAll(new RegExp("<" + localElement("row") + "\\b([^>]*)>([\\s\\S]*?)</" + localElement("row") + ">", "gi"))) {
     if (rows.length >= maxRows) break;
     const attributes = match[1]!;
-    if (hiddenOnly && !/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const rowHidden = /(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes);
+    if (hiddenOnly && !rowHidden && columns.length === 0) continue;
     const rowNumber = Number(xmlAttribute(attributes, "r"));
     if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) continue;
-    rows.push({ worksheet, row: rowNumber, values: rowValues(match[2]!, sharedStrings).slice(0, 128) });
+    const values = rowValues(match[2]!, sharedStrings, hiddenOnly && !rowHidden ? columns : undefined).slice(0, 128);
+    if (hiddenOnly && values.length === 0) continue;
+    rows.push({ worksheet, row: rowNumber, values });
   }
   return rows;
 }
@@ -528,7 +563,7 @@ export class FakeWorkbookEngine implements EngineAdapter {
     const workbookRels = new TextDecoder().decode(files["xl/_rels/workbook.xml.rels"] ?? new Uint8Array());
     const sheets = workbookSheets(workbookXml);
     const sharedStrings = sharedStringValues(files);
-    const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryHidden");
+    const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
     const rows: RevealRow[] = [];
 
     if (finding.mechanism === "hidden_worksheet") {

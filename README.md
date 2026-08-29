@@ -126,19 +126,41 @@ contract.
 The transformer edits only the planned workbook, relationship, and worksheet
 relationship members. It also edits the content-types member when it must
 remove a worksheet-specific override. Untouched ZIP member payloads stay
-byte-for-byte identical. Verification reruns the hidden-worksheet Attack,
-validates relationships and content types, checks the visible-content baseline,
-and reopens the candidate with the available readers. Any remaining Finding,
+byte-for-byte identical. Verification reruns every enabled Attack, validates
+relationships and content types, checks the visible-content baseline, and
+reopens the candidate with the available readers. Any remaining Finding,
 unexplained member change, parse failure, or reopen failure destroys the
-candidate and ends the Run in Refusal. This issue does not repair hidden rows or
-columns, pivot caches, macros, external connections, or unsupported OOXML
-extensions.
+candidate and ends the Run in Refusal. Hidden-row and hidden-column value
+handling is described in issue #8 below; pivot caches, macros, external
+connections, and unsupported OOXML extensions remain outside this supported
+profile.
 
 The initial [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/13#pullrequestreview-5056601225)
 reported four High-severity and one Medium-severity correctness findings. The
 fixes landed in commit `61d5852`. The [final Qodo update](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460222193)
 for the completed branch reports zero bugs, rule violations, requirement gaps,
 or skill insights. No findings were dismissed or deferred.
+
+## Issue #8 hidden-row and hidden-column value governance
+
+Issue #8 extends the supported profile with a deterministic Attack for values
+in hidden rows and columns. It reports Finding metadata for every concealed
+value regardless of business legitimacy. Optional Reveal follows the same
+privacy and Scope Assessment rules as the hidden-worksheet journey: it is
+disabled by default, local-only when explicitly enabled, short-lived, and never
+places values in public Run/MCP responses, SQLite, logs, or reports.
+
+When dependencies permit clearing, one complete Repair Plan names each exact
+concealed cell reference and requires a fresh native Repair Approval bound to
+the Run, revision, original Artifact Reference, plan hash, and engine version.
+The dependency proof covers visible formulas, defined names, data validation,
+tables, charts, pivots, and package relationships. Any dependency produces a
+visible Refusal. The surgical transformation changes only the planned
+worksheet member, preserving hidden dimensions, formatting, the original
+Artifact Reference, and unrelated OOXML members. Verification reruns every
+enabled Attack and normalizes only the approved concealed values when proving
+visible workbook fidelity. Malformed or otherwise unprovable packages refuse
+before Repair.
 
 ## Current status
 

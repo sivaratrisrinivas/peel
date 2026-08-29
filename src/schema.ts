@@ -210,13 +210,21 @@ function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
 
 function parseRepairAction(value: unknown, index: number): RepairAction {
   const input = record(value, `repair_plan.actions[${index}]`);
-  exactKeys(input, ["kind", "worksheet", "target_member", "changed_members", "capability_losses"], `repair_plan.actions[${index}]`);
+  const kind = enumValue(input.kind, ["delete_hidden_worksheet", "clear_hidden_cell_values"] as const, `repair_plan.actions[${index}].kind`);
+  const path = `repair_plan.actions[${index}]`;
+  const commonKeys = ["kind", "worksheet", "target_member", "changed_members", "capability_losses"];
+  exactKeys(input, kind === "clear_hidden_cell_values" ? [...commonKeys, "cell_references"] : commonKeys, path);
+  const common = {
+    worksheet: stringValue(input.worksheet, `${path}.worksheet`),
+    target_member: stringValue(input.target_member, `${path}.target_member`),
+    changed_members: parseStringArray(input.changed_members, `${path}.changed_members`, 1),
+    capability_losses: parseStringArray(input.capability_losses, `${path}.capability_losses`, 1),
+  };
+  if (kind === "delete_hidden_worksheet") return { kind, ...common };
   return {
-    kind: enumValue(input.kind, ["delete_hidden_worksheet"] as const, `repair_plan.actions[${index}].kind`),
-    worksheet: stringValue(input.worksheet, `repair_plan.actions[${index}].worksheet`),
-    target_member: stringValue(input.target_member, `repair_plan.actions[${index}].target_member`),
-    changed_members: parseStringArray(input.changed_members, `repair_plan.actions[${index}].changed_members`, 1),
-    capability_losses: parseStringArray(input.capability_losses, `repair_plan.actions[${index}].capability_losses`, 1),
+    kind,
+    ...common,
+    cell_references: parseStringArray(input.cell_references, `${path}.cell_references`, 1),
   };
 }
 

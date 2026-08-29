@@ -200,6 +200,127 @@ def _matching_element(xml: str, element: str, sheet: dict[str, str]) -> bool:
     return any(_contains_sheet_reference(match.group(0), sheet) for match in re.finditer(rf"<{_local_element(element)}\b[^>]*>[\s\S]*?</{_local_element(element)}>", xml, re.IGNORECASE))
 
 
+def _cell_info(reference: str) -> tuple[str, int, int] | None:
+    match = re.fullmatch(r"\$?([A-Z]{1,3})\$?([1-9][0-9]*)", reference, re.IGNORECASE)
+    if not match:
+        return None
+    column = 0
+    for character in match.group(1).upper():
+        column = column * 26 + ord(character) - 64
+    row = int(match.group(2))
+    return f"{match.group(1).upper()}{row}", column, row
+
+
+def _hidden_dimension_ranges(xml: str) -> tuple[set[int], list[tuple[int, int]]]:
+    rows: set[int] = set()
+    for match in re.finditer(rf"<{_local_element('row')}\b([^>]*)/?>(?:</{_local_element('row')}>)?", xml, re.IGNORECASE):
+        attributes = match.group(1)
+        if not re.search(r"(?:^|\s)hidden=[\"'](?:1|true)[\"']", attributes, re.IGNORECASE):
+            continue
+        value = _xml_attribute(attributes, "r")
+        if value and value.isdigit() and int(value) > 0:
+            rows.add(int(value))
+    columns: list[tuple[int, int]] = []
+    for match in re.finditer(rf"<{_local_element('col')}\b([^>]*)/?>(?:</{_local_element('col')}>)?", xml, re.IGNORECASE):
+        attributes = match.group(1)
+        if not re.search(r"(?:^|\s)hidden=[\"'](?:1|true)[\"']", attributes, re.IGNORECASE):
+            continue
+        minimum = _xml_attribute(attributes, "min")
+        maximum = _xml_attribute(attributes, "max")
+        if minimum and maximum and minimum.isdigit() and maximum.isdigit() and int(minimum) > 0 and int(maximum) >= int(minimum):
+            columns.append((int(minimum), int(maximum)))
+    return rows, columns
+
+
+def _concealed_cells(xml: str) -> list[str]:
+    hidden_rows, hidden_columns = _hidden_dimension_ranges(xml)
+    cells: list[tuple[int, int, str]] = []
+    for match in re.finditer(rf"<{_local_element('c')}\b([^>]*?)(?:/>|>([\s\S]*?)</{_local_element('c')}>)", xml, re.IGNORECASE):
+        reference = _cell_info(_xml_attribute(match.group(1), "r") or "")
+        if reference is None or not re.search(rf"<{_local_element('f|v|is')}\b", match.group(2) or "", re.IGNORECASE):
+            continue
+        normalized, column, row = reference
+        hidden_column = any(minimum <= column <= maximum for minimum, maximum in hidden_columns)
+        if row in hidden_rows or hidden_column:
+            cells.append((row, column, normalized))
+    return [reference for _, _, reference in sorted(cells)]
+
+
+def _concealed_cells_by_worksheet(files: dict[str, bytes], sheets: list[dict[str, str]]) -> dict[str, list[str]]:
+    return {
+        sheet["path"]: cells
+        for sheet in sheets
+        if sheet["path"] in files
+        for cells in [_concealed_cells(files[sheet["path"]].decode("utf-8"))]
+        if cells
+    }
+
+
+def _cell_in_range(reference: tuple[str, int, int], start: tuple[str, int, int], end: tuple[str, int, int]) -> bool:
+    return (
+        min(start[2], end[2]) <= reference[2] <= max(start[2], end[2])
+        and min(start[1], end[1]) <= reference[1] <= max(start[1], end[1])
+    )
+
+
+def _references_cells(text: str, sheet: dict[str, str], cells: list[str], current_sheet_path: str | None = None) -> bool:
+    targets = [cell for cell in (_cell_info(value) for value in cells) if cell is not None]
+    if not targets:
+        return False
+    decoded = _decode_xml(text)
+    reference_pattern = re.compile(
+        r"(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
+        re.IGNORECASE,
+    )
+    for match in reference_pattern.finditer(decoded):
+        referenced_sheet = (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2) or "").strip()
+        if referenced_sheet.casefold() != sheet["name"].casefold():
+            continue
+        start = _cell_info(f"{match.group(3)}{match.group(4)}")
+        end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
+        if start and end and any(_cell_in_range(target, start, end) for target in targets):
+            return True
+    if current_sheet_path != sheet["path"]:
+        return False
+    local_pattern = re.compile(
+        r"(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    for match in local_pattern.finditer(decoded):
+        start = _cell_info(f"{match.group(1)}{match.group(2)}")
+        end = _cell_info(f"{match.group(3) or match.group(1)}{match.group(4) or match.group(2)}")
+        if start and end and any(_cell_in_range(target, start, end) for target in targets):
+            return True
+    return False
+
+
+def _matching_elements_for_cells(
+    xml: str,
+    element: str,
+    sheet: dict[str, str],
+    cells: list[str],
+    current_sheet_path: str | None = None,
+) -> bool:
+    return any(
+        _references_cells(match.group(0), sheet, cells, current_sheet_path)
+        for match in re.finditer(rf"<{_local_element(element)}\b[^>]*>[\s\S]*?</{_local_element(element)}>", xml, re.IGNORECASE)
+    )
+
+
+def _member_is_related_to_worksheet(member: str, worksheet: str, relationships: list[dict[str, str]]) -> bool:
+    current = member
+    seen: set[str] = set()
+    while current not in seen:
+        seen.add(current)
+        relation = next((candidate for candidate in relationships if candidate["target"] == current), None)
+        if relation is None:
+            return False
+        if relation["source"] == worksheet:
+            return True
+        current = relation["source"]
+    return False
+
+
 def _empty_dependency_analysis() -> dict[str, list[str]]:
     return {
         "visible_formulas": [],
@@ -261,6 +382,21 @@ def _repair_action(sheet: dict[str, str], files: dict[str, bytes]) -> dict[str, 
     }
 
 
+def _clear_action(sheet: dict[str, str], cells: list[str]) -> dict[str, Any]:
+    return {
+        "kind": "clear_hidden_cell_values",
+        "worksheet": sheet["name"],
+        "target_member": sheet["path"],
+        "cell_references": list(cells),
+        "changed_members": [sheet["path"]],
+        "capability_losses": [
+            f"The concealed values in worksheet {sheet['name']} at {', '.join(cells)} will be cleared.",
+            "The hidden row and column dimensions, cell formatting, formulas outside these cells, and unrelated package members are preserved.",
+            "The cleared values cannot be restored from the repaired artifact; the original Artifact Reference remains unchanged.",
+        ],
+    }
+
+
 def _build_repair_plan(
     files: dict[str, bytes],
     sheets: list[dict[str, str]],
@@ -268,7 +404,8 @@ def _build_repair_plan(
     artifact_sha256: str,
 ) -> dict[str, Any] | None:
     hidden = [sheet for sheet in sheets if sheet["state"] in {"hidden", "veryhidden"}]
-    if not hidden:
+    concealed_by_worksheet = _concealed_cells_by_worksheet(files, sheets)
+    if not hidden and not concealed_by_worksheet:
         return None
     dependencies = _empty_dependency_analysis()
     relationships = _relationship_entries(files)
@@ -285,7 +422,7 @@ def _build_repair_plan(
             name for name in files if name == "xl/connections.xml" or name.startswith("xl/externalLinks/")
         )
         reasons.append("External connections are present and cannot be proven safe by this Repair.")
-    if any(finding["mechanism"] != "hidden_worksheet" for finding in findings):
+    if any(finding["mechanism"] not in {"hidden_worksheet", "hidden_row_or_column"} for finding in findings):
         reasons.append("The complete plan contains a concealed mechanism that this Repair does not transform.")
     for sheet in sheets:
         if (
@@ -354,6 +491,77 @@ def _build_repair_plan(
         else:
             actions.append(_repair_action(sheet, files))
 
+    visible_sheet_paths = {
+        candidate["path"]
+        for candidate in sheets
+        if candidate["state"] not in {"hidden", "veryhidden"}
+    }
+    for sheet in sheets:
+        if sheet["state"] in {"hidden", "veryhidden"}:
+            continue
+        cells = concealed_by_worksheet.get(sheet["path"], [])
+        if not cells:
+            continue
+        sheet_reasons: list[str] = []
+        dependent_members: set[str] = set()
+        for member, payload in files.items():
+            xml = payload.decode("utf-8", errors="strict") if member.endswith((".xml", ".rels")) else ""
+            related_to_sheet = member == sheet["path"] or _member_is_related_to_worksheet(member, sheet["path"], relationships)
+            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "f", sheet, cells, member):
+                dependencies["visible_formulas"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("visible formula in " + member)
+            if member == "xl/workbook.xml" and _matching_elements_for_cells(xml, "definedName", sheet, cells):
+                dependencies["defined_names"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("defined name in xl/workbook.xml")
+            if member in visible_sheet_paths and _matching_elements_for_cells(xml, "dataValidation", sheet, cells, member):
+                dependencies["data_validation"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("data validation in " + member)
+            if member.startswith("xl/tables/") and member.endswith(".xml") and _references_cells(
+                xml, sheet, cells, sheet["path"] if related_to_sheet else None
+            ):
+                dependencies["tables"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("table in " + member)
+            if (
+                (member.startswith("xl/charts/") or member.startswith("xl/drawings/"))
+                and member.endswith(".xml")
+                and _references_cells(xml, sheet, cells, sheet["path"] if related_to_sheet else None)
+            ):
+                dependencies["charts"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("chart or drawing in " + member)
+            if member.startswith("xl/pivot") and member.endswith(".xml") and _references_cells(
+                xml, sheet, cells, sheet["path"] if related_to_sheet else None
+            ):
+                dependencies["pivots"].append(member)
+                dependent_members.add(member)
+                sheet_reasons.append("pivot in " + member)
+        for relation in relationships:
+            if relation["source"] != sheet["path"]:
+                continue
+            if (
+                relation["target"] in dependent_members
+                or ("table" in relation["type"].lower() and relation["target"] in dependencies["tables"])
+                or (
+                    ("chart" in relation["type"].lower() or "drawing" in relation["type"].lower())
+                    and relation["target"] in dependencies["charts"]
+                )
+                or ("pivot" in relation["type"].lower() and relation["target"] in dependencies["pivots"])
+            ):
+                dependencies["package_relationships"].append(relation["member"])
+                sheet_reasons.append("package relationship in " + relation["member"])
+        if sheet_reasons:
+            reasons.append(
+                f"Concealed values in worksheet {sheet['name']} have dependencies: "
+                + ", ".join(_unique(sheet_reasons))
+                + "."
+            )
+        else:
+            actions.append(_clear_action(sheet, cells))
+
     plan: dict[str, Any] = {
         "version": API_VERSION,
         "operation": "repair_plan",
@@ -383,6 +591,12 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
         return {"files": {}, "sheets": [], "findings": [], "profile_accepted": False, "unknown": []}
     unknown = [name for name in files if not _allowed_profile_part(name)]
     try:
+        for name, payload in files.items():
+            if name.endswith((".xml", ".rels")):
+                ElementTree.fromstring(payload)
+    except (ElementTree.ParseError, UnicodeDecodeError):
+        return {"files": files, "sheets": [], "findings": [], "profile_accepted": False, "unknown": unknown}
+    try:
         content_types = files["[Content_Types].xml"].decode("utf-8")
         workbook = files["xl/workbook.xml"]
         profile_accepted = bool(
@@ -400,12 +614,10 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
     hidden = [sheet for sheet in sheets if sheet["state"] in {"hidden", "veryhidden"}]
     if hidden:
         findings.append({"mechanism": "hidden_worksheet", "location": "xl/workbook.xml", "count": len(hidden)})
-    hidden_rows = 0
-    for name, payload in files.items():
-        if name.startswith("xl/worksheets/") and name.endswith(".xml"):
-            hidden_rows += len(re.findall(rf"<{_local_element('row|col')}\b[^>]*\bhidden=[\"'](?:1|true)[\"'][^>]*>", payload.decode("utf-8"), re.IGNORECASE))
-    if hidden_rows:
-        findings.append({"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": hidden_rows})
+    concealed = _concealed_cells_by_worksheet(files, sheets)
+    concealed_value_count = sum(len(cells) for cells in concealed.values())
+    if concealed_value_count:
+        findings.append({"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": concealed_value_count})
     return {
         "files": files,
         "sheets": sheets,
@@ -509,6 +721,44 @@ def _surgical_rewrite(path: Path, changes: dict[str, bytes | None]) -> bytes:
     return b"".join(local_parts) + central_directory + eocd
 
 
+def _clear_cell_values(xml: str, cells: list[str]) -> str:
+    targets = {
+        parsed[0]
+        for value in cells
+        if (parsed := _cell_info(value)) is not None
+    }
+    changed: set[str] = set()
+    cell_pattern = re.compile(
+        rf"(<{_local_element('c')}\b[^>]*>)([\s\S]*?)(</{_local_element('c')}>)|(<{_local_element('c')}\b[^>]*/>)",
+        re.IGNORECASE,
+    )
+    value_pattern = re.compile(
+        rf"<{_local_element('f|v|is')}\b[\s\S]*?(?:</{_local_element('f|v|is')}>|/>)",
+        re.IGNORECASE,
+    )
+
+    def clear(match: re.Match[str]) -> str:
+        opening = match.group(1)
+        content = match.group(2)
+        closing = match.group(3)
+        attributes = re.search(rf"<{_local_element('c')}\b([^>]*)", opening or "", re.IGNORECASE)
+        reference = _cell_info(_xml_attribute(attributes.group(1), "r") or "")[0] if attributes else None
+        if reference is None or reference not in targets:
+            return match.group(0)
+        if opening is None or content is None or closing is None:
+            raise ValueError("concealed cell is not a complete XML element")
+        cleared = value_pattern.sub("", content)
+        if cleared == content:
+            raise ValueError("concealed cell has no clearable value")
+        changed.add(reference)
+        return opening + cleared + closing
+
+    result = cell_pattern.sub(clear, xml)
+    if changed != targets:
+        raise ValueError("repair target concealed cell is missing")
+    return result
+
+
 def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> dict[str, Any]:
     inspection = _inspect_package(path, artifact_sha256)
     if not inspection["profile_accepted"] or inspection.get("plan") != plan or plan.get("status") != "eligible":
@@ -523,7 +773,13 @@ def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> d
     relationships = files["xl/_rels/workbook.xml.rels"].decode("utf-8")
     content_types = files["[Content_Types].xml"].decode("utf-8")
     changes: dict[str, bytes | None] = {}
+    workbook_changed = False
     for action in plan["actions"]:
+        if action["kind"] == "clear_hidden_cell_values":
+            target = action["target_member"]
+            changes[target] = _clear_cell_values(files[target].decode("utf-8"), action["cell_references"]).encode("utf-8")
+            continue
+        workbook_changed = True
         worksheet_name = action["worksheet"]
         relationship_id = ""
 
@@ -556,8 +812,9 @@ def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> d
         relationship_part = _worksheet_relationship_member(target)
         if relationship_part in plan["changed_members"]:
             changes[relationship_part] = None
-    changes["xl/workbook.xml"] = workbook.encode("utf-8")
-    changes["xl/_rels/workbook.xml.rels"] = relationships.encode("utf-8")
+    if workbook_changed:
+        changes["xl/workbook.xml"] = workbook.encode("utf-8")
+        changes["xl/_rels/workbook.xml.rels"] = relationships.encode("utf-8")
     if "[Content_Types].xml" in plan["changed_members"]:
         changes["[Content_Types].xml"] = content_types.encode("utf-8")
     changed_members = sorted(changes)
@@ -595,7 +852,16 @@ def _visible_baseline(files: dict[str, bytes]) -> str:
         {
             "name": sheet["name"],
             "path": sheet["path"],
-            "xml": base64.b64encode(files.get(sheet["path"], b"")).decode("ascii"),
+            "xml": base64.b64encode(
+                (
+                    _clear_cell_values(
+                        files[sheet["path"]].decode("utf-8"),
+                        _concealed_cells(files[sheet["path"]].decode("utf-8")),
+                    )
+                    if sheet["path"] in files
+                    else ""
+                ).encode("utf-8")
+            ).decode("ascii"),
         }
         for sheet in sheets
     ]

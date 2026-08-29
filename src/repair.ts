@@ -21,6 +21,12 @@ interface SheetInfo {
   path: string;
 }
 
+interface CellInfo {
+  reference: string;
+  column: number;
+  row: number;
+}
+
 interface PackageInspection {
   files: Record<string, Uint8Array>;
   sheets: SheetInfo[];
@@ -140,12 +146,122 @@ function allowedProfilePart(name: string): boolean {
   );
 }
 
+function xmlWellFormed(xml: string): boolean {
+  const source = xml
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
+    .replace(/<\?[\s\S]*?\?>/g, "")
+    .replace(/<!DOCTYPE[\s\S]*?>/gi, "");
+  const stack: string[] = [];
+  let roots = 0;
+  const tags = /<\/?([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s[^<>]*?)?\/?>/g;
+  for (const match of source.matchAll(tags)) {
+    const full = match[0] ?? "";
+    const name = match[1]!.toLowerCase();
+    if (full.startsWith("</")) {
+      if (stack.pop() !== name) return false;
+    } else {
+      if (stack.length === 0 && ++roots > 1) return false;
+      if (!/\/\s*>$/.test(full)) stack.push(name);
+    }
+  }
+  return stack.length === 0 && roots === 1 && /<[A-Za-z_]/.test(source);
+}
+
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
 function localElement(element: string): string {
   return `(?:[A-Za-z_][\\w.-]*:)?(?:${element})`;
+}
+
+function cellColumn(column: string): number {
+  let result = 0;
+  for (const character of column.toUpperCase()) result = result * 26 + character.charCodeAt(0) - 64;
+  return result;
+}
+
+function cellInfo(reference: string): CellInfo | undefined {
+  const match = reference.match(/^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$/i);
+  if (!match) return undefined;
+  const column = cellColumn(match[1]!);
+  const row = Number(match[2]);
+  return Number.isSafeInteger(row) && column > 0 ? { reference: `${match[1]!.toUpperCase()}${row}`, column, row } : undefined;
+}
+
+function hiddenDimensionRanges(xml: string): { rows: Set<number>; columns: Array<[number, number]> } {
+  const rows = new Set<number>();
+  for (const match of xml.matchAll(new RegExp(`<${localElement("row")}\\b([^>]*)\\/?>(?:<\\/${localElement("row")}>)?`, "gi"))) {
+    const attributes = match[1] ?? "";
+    if (!/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const row = Number(xmlAttribute(attributes, "r"));
+    if (Number.isSafeInteger(row) && row > 0) rows.add(row);
+  }
+  const columns: Array<[number, number]> = [];
+  for (const match of xml.matchAll(new RegExp(`<${localElement("col")}\\b([^>]*)\\/?>(?:<\\/${localElement("col")}>)?`, "gi"))) {
+    const attributes = match[1] ?? "";
+    if (!/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const minimum = Number(xmlAttribute(attributes, "min"));
+    const maximum = Number(xmlAttribute(attributes, "max"));
+    if (Number.isSafeInteger(minimum) && Number.isSafeInteger(maximum) && minimum > 0 && maximum >= minimum) {
+      columns.push([minimum, maximum]);
+    }
+  }
+  return { rows, columns };
+}
+
+function cellHasValue(content: string): boolean {
+  return new RegExp(`<${localElement("f|v|is")}\\b`, "i").test(content);
+}
+
+function concealedCells(xml: string): CellInfo[] {
+  const dimensions = hiddenDimensionRanges(xml);
+  const cells: CellInfo[] = [];
+  for (const match of xml.matchAll(new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${localElement("c")}>)`, "gi"))) {
+    const reference = cellInfo(xmlAttribute(match[1] ?? "", "r") ?? "");
+    if (!reference || !cellHasValue(match[2] ?? "")) continue;
+    const hiddenColumn = dimensions.columns.some(([minimum, maximum]) => reference.column >= minimum && reference.column <= maximum);
+    if (dimensions.rows.has(reference.row) || hiddenColumn) cells.push(reference);
+  }
+  return cells.sort((left, right) => left.row - right.row || left.column - right.column);
+}
+
+function concealedCellsByWorksheet(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const sheet of sheets) {
+    if (!sheet.path || !files[sheet.path]) continue;
+    const cells = concealedCells(decoder.decode(files[sheet.path]!)).map((cell) => cell.reference);
+    if (cells.length > 0) result[sheet.path] = cells;
+  }
+  return result;
+}
+
+function cellInRange(reference: CellInfo, start: CellInfo, end: CellInfo): boolean {
+  return reference.row >= Math.min(start.row, end.row) && reference.row <= Math.max(start.row, end.row) &&
+    reference.column >= Math.min(start.column, end.column) && reference.column <= Math.max(start.column, end.column);
+}
+
+function referencesCells(text: string, sheet: SheetInfo, cells: readonly string[], currentSheetPath?: string): boolean {
+  if (cells.length === 0) return false;
+  const decoded = decodeXml(text);
+  const targets = cells.map(cellInfo).filter((cell): cell is CellInfo => cell !== undefined);
+  const referencePattern = /(?:'((?:[^']|'')+)'|([A-Za-z_][\w .-]*))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?/gi;
+  for (const match of decoded.matchAll(referencePattern)) {
+    const referencedSheet = match[1] !== undefined ? match[1].replace(/''/g, "'") : match[2];
+    if (!referencedSheet || referencedSheet.trim().toLowerCase() !== sheet.name.toLowerCase()) continue;
+    const start = cellInfo(`${match[3]}${match[4]}`);
+    const end = cellInfo(`${match[5] ?? match[3]}${match[6] ?? match[4]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  if (currentSheetPath !== sheet.path) return false;
+  const localPattern = /(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localPattern)) {
+    const start = cellInfo(`${match[1]}${match[2]}`);
+    const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  return false;
 }
 
 function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
@@ -161,6 +277,37 @@ function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
 function matchingElements(xml: string, element: string, sheet: SheetInfo): boolean {
   for (const match of xml.matchAll(new RegExp(`<${localElement(element)}\\b[^>]*>([\\s\\S]*?)</${localElement(element)}>`, "gi"))) {
     if (includesSheetReference(match[0] ?? "", sheet)) return true;
+  }
+  return false;
+}
+
+function matchingElementsForCells(
+  xml: string,
+  element: string,
+  sheet: SheetInfo,
+  cells: readonly string[],
+  currentSheetPath?: string,
+): boolean {
+  const pattern = "<" + localElement(element) + "\\b[^>]*>([\\s\\S]*?)</" + localElement(element) + ">";
+  for (const match of xml.matchAll(new RegExp(pattern, "gi"))) {
+    if (referencesCells(match[0] ?? "", sheet, cells, currentSheetPath)) return true;
+  }
+  return false;
+}
+
+function memberIsRelatedToWorksheet(
+  member: string,
+  worksheet: string,
+  relationships: readonly { source: string; target: string }[],
+): boolean {
+  let current = member;
+  const seen = new Set<string>();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const relation = relationships.find((candidate) => candidate.target === current);
+    if (!relation) return false;
+    if (relation.source === worksheet) return true;
+    current = relation.source;
   }
   return false;
 }
@@ -218,6 +365,21 @@ function actionFor(sheet: SheetInfo, files: Record<string, Uint8Array>): RepairA
   };
 }
 
+function clearActionFor(sheet: SheetInfo, cells: readonly string[]): RepairAction {
+  return {
+    kind: "clear_hidden_cell_values",
+    worksheet: sheet.name,
+    target_member: sheet.path,
+    cell_references: [...cells],
+    changed_members: [sheet.path],
+    capability_losses: [
+      "The concealed values in worksheet " + sheet.name + " at " + cells.join(", ") + " will be cleared.",
+      "The hidden row and column dimensions, cell formatting, formulas outside these cells, and unrelated package members are preserved.",
+      "The cleared values cannot be restored from the repaired artifact; the original Artifact Reference remains unchanged.",
+    ],
+  };
+}
+
 function hasContentTypeOverride(files: Record<string, Uint8Array>, target: string): boolean {
   const xml = decoder.decode(files["[Content_Types].xml"] ?? new Uint8Array());
   for (const match of xml.matchAll(new RegExp(`<${localElement("Override")}\\b([^>]*)\\/?>(?:<\\/${localElement("Override")}>)?`, "gi"))) {
@@ -236,7 +398,8 @@ function buildPlan(
   unknownMembers: readonly string[],
 ): RepairPlan | undefined {
   const hidden = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
-  if (hidden.length === 0) return undefined;
+  const concealedByWorksheet = concealedCellsByWorksheet(files, sheets);
+  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0) return undefined;
   const relationships = relationshipEntries(files);
   const dependencies = emptyDependencies();
   const reasons: string[] = [];
@@ -258,7 +421,7 @@ function buildPlan(
   if (unknownMembers.length > 0) reasons.push(`Unsupported content-bearing package members: ${unknownMembers.join(", ")}`);
   if (macro) reasons.push("Macros are present and cannot be preserved by this Repair.");
   if (external) reasons.push("External connections are present and cannot be proven safe by this Repair.");
-  if (findings.some((finding) => finding.mechanism !== "hidden_worksheet")) {
+  if (findings.some((finding) => !["hidden_worksheet", "hidden_row_or_column"].includes(finding.mechanism))) {
     reasons.push("The complete plan contains a concealed mechanism that this Repair does not transform.");
   }
 
@@ -323,6 +486,65 @@ function buildPlan(
     }
   }
 
+  for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
+    const cells = concealedByWorksheet[sheet.path] ?? [];
+    if (cells.length === 0) continue;
+    const sheetDependencies: string[] = [];
+    const dependentMembers = new Set<string>();
+    for (const [member, bytes] of Object.entries(files)) {
+      const xml = decoder.decode(bytes);
+      const relatedToSheet = member === sheet.path || memberIsRelatedToWorksheet(member, sheet.path, relationships);
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "f", sheet, cells, member)) {
+        dependencies.visible_formulas.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("visible formula in " + member);
+      }
+      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells)) {
+        dependencies.defined_names.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("defined name in xl/workbook.xml");
+      }
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "dataValidation", sheet, cells, member)) {
+        dependencies.data_validation.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("data validation in " + member);
+      }
+      if (member.startsWith("xl/tables/") && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        dependencies.tables.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("table in " + member);
+      }
+      if ((member.startsWith("xl/charts/") || member.startsWith("xl/drawings/")) && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        dependencies.charts.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("chart or drawing in " + member);
+      }
+      if (member.startsWith("xl/pivot") && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined)) {
+        dependencies.pivots.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("pivot in " + member);
+      }
+    }
+    for (const relation of relationships) {
+      if (relation.source !== sheet.path) continue;
+      if (dependentMembers.has(relation.target) ||
+        (relation.type.toLowerCase().includes("table") && dependencies.tables.includes(relation.target)) ||
+        ((relation.type.toLowerCase().includes("chart") || relation.type.toLowerCase().includes("drawing")) && dependencies.charts.includes(relation.target)) ||
+        (relation.type.toLowerCase().includes("pivot") && dependencies.pivots.includes(relation.target))) {
+        dependencies.package_relationships.push(relation.member);
+        sheetDependencies.push("package relationship in " + relation.member);
+      }
+    }
+    if (sheetDependencies.length > 0) {
+      reasons.push("Concealed values in worksheet " + sheet.name + " have dependencies: " + unique(sheetDependencies).join(", ") + ".");
+    } else {
+      actions.push(clearActionFor(sheet, cells));
+    }
+  }
+
   const plan: RepairPlan = {
     version: "1",
     operation: "repair_plan",
@@ -359,23 +581,24 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
     return { files: {}, sheets: [], findings: [], profileAccepted: false, unknownMembers: [] };
   }
   const unknownMembers = Object.keys(files).filter((name) => !allowedProfilePart(name));
+  const malformedXml = Object.entries(files).some(([name, bytes]) =>
+    (name.endsWith(".xml") || name.endsWith(".rels")) && !xmlWellFormed(decoder.decode(bytes)));
   const workbook = files["xl/workbook.xml"];
   const contentTypes = files["[Content_Types].xml"];
   const profileAccepted = Boolean(
     workbook && contentTypes && files["xl/worksheets/sheet1.xml"] &&
     decoder.decode(contentTypes).includes("spreadsheetml.sheet.main+xml") &&
-    unknownMembers.length === 0,
+    unknownMembers.length === 0 &&
+    !malformedXml,
   );
   if (!profileAccepted) return { files, sheets: workbook ? workbookSheets(files) : [], findings: [], profileAccepted: false, unknownMembers };
   const sheets = workbookSheets(files);
   const findings: Finding[] = [];
   const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
   if (hiddenSheets.length > 0) findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
-  const hiddenRows = Object.entries(files).reduce((count, [name, member]) => {
-    if (!name.startsWith("xl/worksheets/") || !name.endsWith(".xml")) return count;
-    return count + (decoder.decode(member).match(new RegExp(`<${localElement("row|col")}\\b[^>]*\\bhidden=["'](?:1|true)["'][^>]*>`, "gi")) ?? []).length;
-  }, 0);
-  if (hiddenRows > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: hiddenRows });
+  const concealed = concealedCellsByWorksheet(files, sheets);
+  const concealedValueCount = Object.values(concealed).reduce((count, cells) => count + cells.length, 0);
+  if (concealedValueCount > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: concealedValueCount });
   const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers);
   return { files, sheets, findings, profileAccepted, unknownMembers, ...(plan ? { plan } : {}) };
 }
@@ -436,6 +659,33 @@ function removeContentType(xml: string, target: string): string {
   return result;
 }
 
+function clearCellValues(xml: string, cells: readonly string[]): string {
+  const targets = new Set(cells.map((reference) => cellInfo(reference)?.reference).filter((reference): reference is string => reference !== undefined));
+  const changed = new Set<string>();
+  const cellPattern = new RegExp(
+    "(<" + localElement("c") + "\\b[^>]*>)([\\s\\S]*?)(</" + localElement("c") + ">)|(<" + localElement("c") + "\\b[^>]*/>)",
+    "gi",
+  );
+  const valuePattern = new RegExp(
+    "<" + localElement("f|v|is") + "\\b[\\s\\S]*?(?:</" + localElement("f|v|is") + ">|\\/>)",
+    "gi",
+  );
+  const result = xml.replace(cellPattern, (full, opening: string | undefined, content: string | undefined, closing: string | undefined) => {
+    const attributes = opening?.match(new RegExp("<" + localElement("c") + "\\b([^>]*)", "i"))?.[1] ?? "";
+    const reference = cellInfo(xmlAttribute(attributes, "r") ?? "")?.reference;
+    if (!reference || !targets.has(reference)) return full;
+    if (!opening || content === undefined || !closing) throw new Error("concealed cell is not a complete XML element");
+    const cleared = content.replace(valuePattern, "");
+    if (cleared === content) throw new Error("concealed cell has no clearable value");
+    changed.add(reference);
+    return opening + cleared + closing;
+  });
+  if (changed.size !== targets.size || [...targets].some((reference) => !changed.has(reference))) {
+    throw new Error("repair target concealed cell is missing");
+  }
+  return result;
+}
+
 export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha256: string): { bytes: Uint8Array; changedMembers: string[] } {
   if (plan.status !== "eligible" || plan.artifact_sha256 !== artifactSha256) throw new Error("repair plan is not eligible for this artifact");
   const inspection = inspectPackage(bytes, artifactSha256, plan.engine_version);
@@ -444,19 +694,28 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
   let workbook = decoder.decode(inspection.files["xl/workbook.xml"]!);
   let relationships = decoder.decode(inspection.files["xl/_rels/workbook.xml.rels"]!);
   let contentTypes = decoder.decode(inspection.files["[Content_Types].xml"]!);
+  let workbookChanged = false;
   for (const action of plan.actions) {
-    const removed = removeSheet(workbook, action.worksheet);
-    workbook = removed.xml;
-    relationships = removeRelationship(relationships, removed.relationshipId);
-    if (plan.changed_members.includes("[Content_Types].xml")) {
-      contentTypes = removeContentType(contentTypes, action.target_member);
+    if (action.kind === "delete_hidden_worksheet") {
+      workbookChanged = true;
+      const removed = removeSheet(workbook, action.worksheet);
+      workbook = removed.xml;
+      relationships = removeRelationship(relationships, removed.relationshipId);
+      if (plan.changed_members.includes("[Content_Types].xml")) {
+        contentTypes = removeContentType(contentTypes, action.target_member);
+      }
+      changes.set(action.target_member, null);
+      const relationshipPart = worksheetRelationshipMember(action.target_member);
+      if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
+    } else {
+      const current = decoder.decode(inspection.files[action.target_member] ?? new Uint8Array());
+      changes.set(action.target_member, new TextEncoder().encode(clearCellValues(current, action.cell_references)));
     }
-    changes.set(action.target_member, null);
-    const relationshipPart = worksheetRelationshipMember(action.target_member);
-    if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
   }
-  changes.set("xl/workbook.xml", new TextEncoder().encode(workbook));
-  changes.set("xl/_rels/workbook.xml.rels", new TextEncoder().encode(relationships));
+  if (workbookChanged) {
+    changes.set("xl/workbook.xml", new TextEncoder().encode(workbook));
+    changes.set("xl/_rels/workbook.xml.rels", new TextEncoder().encode(relationships));
+  }
   if (plan.changed_members.includes("[Content_Types].xml")) {
     changes.set("[Content_Types].xml", new TextEncoder().encode(contentTypes));
   }
@@ -467,7 +726,13 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
 
 function visibleBaseline(files: Record<string, Uint8Array>): string {
   const sheets = workbookSheets(files).filter((sheet) => sheet.state !== "hidden" && sheet.state !== "veryhidden");
-  return sha256(canonicalJson(sheets.map((sheet) => ({ name: sheet.name, path: sheet.path, xml: Buffer.from(files[sheet.path] ?? new Uint8Array()).toString("base64") }))));
+  return sha256(canonicalJson(sheets.map((sheet) => {
+    const bytes = files[sheet.path] ?? new Uint8Array();
+    const xml = decoder.decode(bytes);
+    const concealed = concealedCells(xml).map((cell) => cell.reference);
+    const baselineXml = concealed.length > 0 ? clearCellValues(xml, concealed) : xml;
+    return { name: sheet.name, path: sheet.path, xml: Buffer.from(baselineXml).toString("base64") };
+  })));
 }
 
 function relationshipsValid(files: Record<string, Uint8Array>): boolean {

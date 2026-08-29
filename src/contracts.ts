@@ -84,13 +84,24 @@ export interface RepairApprovalBinding {
   engine_version: string;
 }
 
-export interface RepairAction {
+export interface DeleteHiddenWorksheetAction {
   kind: "delete_hidden_worksheet";
   worksheet: string;
   target_member: string;
   changed_members: string[];
   capability_losses: string[];
 }
+
+export interface ClearHiddenCellValuesAction {
+  kind: "clear_hidden_cell_values";
+  worksheet: string;
+  target_member: string;
+  cell_references: string[];
+  changed_members: string[];
+  capability_losses: string[];
+}
+
+export type RepairAction = DeleteHiddenWorksheetAction | ClearHiddenCellValuesAction;
 
 export interface DependencyAnalysis {
   visible_formulas: string[];
