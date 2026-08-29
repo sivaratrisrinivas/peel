@@ -55,6 +55,13 @@ function xmlAttribute(attributes: string, name: string): string | undefined {
   return attributes.match(new RegExp(`(?:^|\\s)${escaped}=["']([^"']*)["']`, "i"))?.[1];
 }
 
+function xmlAttributeByLocalName(attributes: string, name: string): string | undefined {
+  for (const match of attributes.matchAll(/\s([A-Za-z_][\w.:-]*)=["']([^"']*)["']/g)) {
+    if (match[1]!.split(":").pop()?.toLowerCase() === name.toLowerCase()) return match[2];
+  }
+  return undefined;
+}
+
 function decodeXml(value: string): string {
   return value
     .replace(/&lt;/g, "<")
@@ -127,7 +134,7 @@ function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
   const relationships = workbookRelationshipMap(files);
   return Array.from(workbook.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => {
     const attributes = match[1] ?? "";
-    const relationshipId = xmlAttribute(attributes, "r:id") ?? xmlAttribute(attributes, "id") ?? "";
+    const relationshipId = xmlAttributeByLocalName(attributes, "id") ?? "";
     return {
       name: decodeXml(xmlAttribute(attributes, "name") ?? ""),
       state: xmlAttribute(attributes, "state")?.toLowerCase() ?? "visible",
@@ -196,8 +203,12 @@ function visibleWorksheetValues(files: Record<string, Uint8Array>, sheets: reado
   const pattern = new RegExp(`<${localElement("c")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("c")}>`, "gi");
   for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
     const xml = decoder.decode(files[sheet.path] ?? new Uint8Array());
+    const concealed = new Set(concealedCells(xml).map((cell) => cell.reference));
+    const unresolved = unresolvedConcealedValues(xml);
     for (const cell of xml.matchAll(pattern)) {
       const attributes = cell[0]!.match(new RegExp(`<${localElement("c")}\\b([^>]*)`, "i"))?.[1] ?? "";
+      const reference = cellInfo(xmlAttributeByLocalName(attributes, "r") ?? "")?.reference;
+      if ((reference !== undefined && concealed.has(reference)) || (reference === undefined && unresolved > 0)) continue;
       const content = cell[1] ?? "";
       const value = content.match(new RegExp(`<${localElement("v|t")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("v|t")}>`, "i"))?.[1];
       if (value !== undefined) {
@@ -217,7 +228,10 @@ function inspectPivotCaches(files: Record<string, Uint8Array>, sheets: readonly 
   for (const definitionMember of Object.keys(files).filter((name) => /^xl\/pivotCache\/pivotCacheDefinition[^/]*\.xml$/i.test(name)).sort()) {
     const definitionXml = decoder.decode(files[definitionMember]!);
     const cacheSource = definitionXml.match(new RegExp(`<${localElement("cacheSource")}\\b([^>]*)`, "i"));
-    const sharedItems = Array.from(definitionXml.matchAll(new RegExp(`<${localElement("sharedItems")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("sharedItems")}>`, "gi"))).map((match) => pivotValueElements(match[1] ?? ""));
+    const sharedItems = Array.from(definitionXml.matchAll(new RegExp(`<${localElement("cacheField")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("cacheField")}>)`, "gi"))).map((field) => {
+      const shared = field[0]!.match(new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "i"));
+      return pivotValueElements(shared?.[0] ?? "");
+    });
     const recordsRelation = relationships.find((relation) => relation.source === definitionMember && relation.type.toLowerCase().includes("pivotcacherecords"));
     const recordsMember = recordsRelation?.target ?? "";
     const recordXml = recordsMember ? decoder.decode(files[recordsMember] ?? new Uint8Array()) : "";
@@ -940,7 +954,7 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   if (concealedValueCount > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: concealedValueCount });
   const pivotCaches = inspectPivotCaches(files, sheets);
   for (const cache of pivotCaches) {
-    if (cache.cacheOnlyCount > 0) findings.push({ mechanism: "pivot_cache", location: cache.recordsMember, count: cache.cacheOnlyCount });
+    if (cache.cacheOnlyCount > 0) findings.push({ mechanism: "pivot_cache", location: cache.recordsMember || cache.definitionMember, count: cache.cacheOnlyCount });
   }
   const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers, unresolved, pivotCaches);
   return { files, sheets, findings, profileAccepted, unknownMembers, pivotCaches, ...(plan ? { plan } : {}) };
@@ -1032,8 +1046,8 @@ function clearCellValues(xml: string, cells: readonly string[]): string {
 function clearPivotCacheDefinition(xml: string): string {
   const sharedAttributes = ["count", "minValue", "maxValue", "minDate", "maxDate"];
   const withoutValues = xml.replace(
-    new RegExp(`<${localElement("sharedItems")}\\b([^>]*?)(?:\\/\\>|>([\\s\\S]*?)<\\/${localElement("sharedItems")}>)`, "gi"),
-    (full, attributes: string, content: string | undefined) => {
+    new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "gi"),
+    (full) => {
       const opening = full.match(new RegExp(`<${localElement("sharedItems")}\\b[^>]*`, "i"))?.[0] ?? "";
       const cleanedOpening = removeXmlAttributes(opening, sharedAttributes);
       return cleanedOpening.replace(/\/\s*$/, "") + "/>";
@@ -1043,7 +1057,7 @@ function clearPivotCacheDefinition(xml: string): string {
 }
 
 function clearPivotCacheRecords(xml: string): string {
-  const withoutRows = xml.replace(new RegExp(`<${localElement("r")}\\b[\\s\\S]*?(?:\\/\\>|>[\\s\\S]*?<\\/${localElement("r")}>)`, "gi"), "");
+  const withoutRows = xml.replace(new RegExp(`<${localElement("r")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("r")}>)`, "gi"), "");
   return withoutRows.replace(new RegExp(`<${localElement("pivotCacheRecords")}\\b([^>]*)>`, "i"), (full) => setXmlAttribute(full, "count", "0"));
 }
 

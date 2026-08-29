@@ -97,6 +97,13 @@ def _xml_attribute(attributes: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _xml_attribute_by_local_name(attributes: str, name: str) -> str | None:
+    for match in re.finditer(r"\s([A-Za-z_][\w.:-]*)=[\"']([^\"']*)[\"']", attributes):
+        if match.group(1).rsplit(":", 1)[-1].lower() == name.lower():
+            return match.group(2)
+    return None
+
+
 def _local_element(element: str) -> str:
     return rf"(?:[A-Za-z_][\w.-]*:)?(?:{element})"
 
@@ -175,7 +182,7 @@ def _workbook_sheets(files: dict[str, bytes]) -> list[dict[str, str]]:
     sheets: list[dict[str, str]] = []
     for match in re.finditer(rf"<{_local_element('sheet')}\b([^>]*)/?>(?:</{_local_element('sheet')}>)?", workbook, re.IGNORECASE):
         attributes = match.group(1)
-        relationship_id = _xml_attribute(attributes, "r:id") or _xml_attribute(attributes, "id") or ""
+        relationship_id = _xml_attribute_by_local_name(attributes, "id") or ""
         sheets.append(
             {
                 "name": _decode_xml(_xml_attribute(attributes, "name") or ""),
@@ -213,6 +220,9 @@ def _pivot_cache_infos(files: dict[str, bytes], sheets: list[dict[str, str]]) ->
     for sheet in sheets:
         if sheet["state"] in {"hidden", "veryhidden"} or sheet["path"] not in files:
             continue
+        worksheet_xml = files[sheet["path"]].decode("utf-8")
+        concealed = set(_concealed_cells(worksheet_xml))
+        unresolved = _unresolved_concealed_values(worksheet_xml)
         try:
             root = ElementTree.fromstring(files[sheet["path"]])
         except (ElementTree.ParseError, UnicodeDecodeError):
@@ -220,7 +230,10 @@ def _pivot_cache_infos(files: dict[str, bytes], sheets: list[dict[str, str]]) ->
         for element in root.iter():
             if _element_name(element) != "c":
                 continue
-            cell_type = element.attrib.get("t", "").lower()
+            cell_type = next((value for key, value in element.attrib.items() if key.rsplit("}", 1)[-1].lower() == "t"), "").lower()
+            reference = next((value for key, value in element.attrib.items() if key.rsplit("}", 1)[-1].lower() == "r"), "")
+            if reference in concealed or (not reference and unresolved > 0):
+                continue
             for child in element:
                 if _element_name(child) in {"v", "t"}:
                     value = _xml_value(child)
@@ -979,7 +992,13 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
     pivot_caches = _pivot_cache_infos(files, sheets)
     for cache in pivot_caches:
         if cache["cache_only_count"] > 0:
-            findings.append({"mechanism": "pivot_cache", "location": cache["records_member"], "count": cache["cache_only_count"]})
+            findings.append(
+                {
+                    "mechanism": "pivot_cache",
+                    "location": cache["records_member"] or cache["definition_member"],
+                    "count": cache["cache_only_count"],
+                }
+            )
     plan = _build_repair_plan(files, sheets, findings, artifact_sha256, unresolved, pivot_caches)
     return {
         "files": files,
@@ -1139,20 +1158,16 @@ def _remove_xml_attributes(opening: str, names: list[str]) -> str:
 
 
 def _clear_pivot_cache_definition(xml: str) -> str:
-    value_tags = _local_element("s|n|d|b|e|m")
     shared_attributes = ["count", "minValue", "maxValue", "minDate", "maxDate"]
     shared_pattern = re.compile(
-        rf"(<{_local_element('sharedItems')}\b[^>]*?)(?:/>|>([\s\S]*?)</{_local_element('sharedItems')}>)",
+        rf"<{_local_element('sharedItems')}\b(?:[^>]*?/\s*>|[^>]*>[\s\S]*?</{_local_element('sharedItems')}>)",
         re.IGNORECASE,
     )
 
     def clear_shared(match: re.Match[str]) -> str:
-        opening = _remove_xml_attributes(match.group(1), shared_attributes)
-        content = match.group(2)
-        if content is None:
-            return opening + "/>"
-        cleared = re.sub(rf"<{value_tags}\b[^>]*(?:/>|>[\s\S]*?</{value_tags}>)", "", content, flags=re.IGNORECASE)
-        return opening + ">" + cleared + "</sharedItems>"
+        opening_match = re.match(rf"<{_local_element('sharedItems')}\b[^>]*", match.group(0), re.IGNORECASE)
+        opening = _remove_xml_attributes(opening_match.group(0) if opening_match else "", shared_attributes)
+        return opening.rstrip("/") + "/>"
 
     result = shared_pattern.sub(clear_shared, xml)
     return re.sub(
@@ -1165,7 +1180,7 @@ def _clear_pivot_cache_definition(xml: str) -> str:
 
 
 def _clear_pivot_cache_records(xml: str) -> str:
-    result = re.sub(rf"<{_local_element('r')}\b[\s\S]*?(?:/>|>[\s\S]*?</{_local_element('r')}>)", "", xml, flags=re.IGNORECASE)
+    result = re.sub(rf"<{_local_element('r')}\b(?:[^>]*?/\s*>|[^>]*>[\s\S]*?</{_local_element('r')}>)", "", xml, flags=re.IGNORECASE)
     return re.sub(
         rf"(<{_local_element('pivotCacheRecords')}\b[^>]*)>",
         lambda match: _set_xml_attribute(match.group(1) + ">", "count", "0"),

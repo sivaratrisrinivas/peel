@@ -13,6 +13,13 @@ const encoder = new TextEncoder();
 const RECIPIENT = "recipient@example.test";
 const FIXTURE = new Uint8Array(readFileSync(fileURLToPath(new URL("./fixtures/pivot-cache-only.xlsx", import.meta.url))));
 
+function zipFixture(files: Record<string, Uint8Array>): Uint8Array<ArrayBuffer> {
+  const bytes = zipSync(files);
+  const copy = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+  copy.set(bytes);
+  return copy;
+}
+
 function setup(bytes = FIXTURE) {
   const clock = new FakeClock(1_700_000_000_000);
   const artifacts = new InMemoryArtifactStore(clock);
@@ -25,6 +32,53 @@ function setup(bytes = FIXTURE) {
   });
   const artifact = artifacts.put(bytes, "pivot-cache-only.xlsx");
   return { clock, artifacts, daemon, artifact, bytes };
+}
+
+function visibleSourceWithPrefixedRelationships(): Uint8Array<ArrayBuffer> {
+  const files = unzipSync(FIXTURE);
+  const workbook = text.decode(files["xl/workbook.xml"]!);
+  files["xl/workbook.xml"] = encoder.encode(
+    workbook
+      .replace('xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"', 'xmlns:x="http://schemas.openxmlformats.org/officeDocument/2006/relationships"')
+      .replaceAll("r:id=", "x:id=")
+      .replace('name="Report"', 'name="Data"'),
+  );
+  files["xl/worksheets/sheet2.xml"] = encoder.encode(
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+      '<row r="1"><c r="A1" t="str"><v>North</v></c><c r="B1" t="str"><v>Q1</v></c><c r="C1"><v>10</v></c></row>' +
+      '<row r="2"><c r="A2" t="str"><v>North</v></c><c r="B2" t="str"><v>Q2</v></c><c r="C2"><v>12</v></c></row>' +
+      '<row r="3"><c r="A3" t="str"><v>South</v></c><c r="B3" t="str"><v>Q1</v></c><c r="C3"><v>8</v></c></row>' +
+      '<row r="4"><c r="A4" t="str"><v>South</v></c><c r="B4" t="str"><v>Q2</v></c><c r="C4"><v>13</v></c></row>' +
+      '</sheetData></worksheet>',
+  );
+  return zipFixture(files);
+}
+
+function missingRecordsRelationshipFixture(): Uint8Array<ArrayBuffer> {
+  const files = unzipSync(FIXTURE);
+  files["xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels"] = encoder.encode(
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+  );
+  return zipFixture(files);
+}
+
+function mixedFieldFixture(): Uint8Array<ArrayBuffer> {
+  const files = unzipSync(FIXTURE);
+  const definition = text.decode(files["xl/pivotCache/pivotCacheDefinition1.xml"]!);
+  files["xl/pivotCache/pivotCacheDefinition1.xml"] = encoder.encode(
+    definition.replace(
+      /<cacheFields[\s\S]*?<\/cacheFields>/,
+      '<cacheFields count="3"><cacheField name="Sales"><sharedItems count="0"/></cacheField>' +
+        '<cacheField name="Region"><sharedItems count="2"><s v="North"/><s v="South"/></sharedItems></cacheField>' +
+        '<cacheField name="Quarter"><sharedItems count="2"><s v="Q1"/><s v="Q2"/></sharedItems></cacheField></cacheFields>',
+    ),
+  );
+  files["xl/pivotCache/pivotCacheRecords1.xml"] = encoder.encode(
+    '<pivotCacheRecords count="4" xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<r><n v="10"/><x v="0"/><x v="0"/></r><r><n v="12"/><x v="0"/><x v="1"/></r>' +
+      '<r><n v="8"/><x v="1"/><x v="0"/></r><r><n v="13"/><x v="1"/><x v="1"/></r></pivotCacheRecords>',
+  );
+  return zipFixture(files);
 }
 
 async function scanFixture(daemon: PeelDaemon, artifact: ArtifactReference) {
@@ -127,8 +181,10 @@ describe("Issue #9 pivot-cache disclosure journey", () => {
     const records = text.decode(candidateFiles["xl/pivotCache/pivotCacheRecords1.xml"]);
     expect(definition).toContain('recordCount="0"');
     expect(definition).not.toMatch(/<(?:s|n|d|b|e|m)\b[^>]*>/i);
+    expect(definition).not.toContain("</sharedItems>");
     expect(records).toContain('count="0"');
     expect(records).not.toMatch(/<r\b/i);
+    expect(records).not.toMatch(/<(?:x|s|n|d|b|e|m)\b/i);
     expect(candidateFiles["xl/pivotTables/pivotTable1.xml"]).toEqual(originalFiles["xl/pivotTables/pivotTable1.xml"]);
 
     const verified = await daemon.execute({
@@ -173,7 +229,7 @@ describe("Issue #9 pivot-cache disclosure journey", () => {
     files["xl/pivotCache/pivotCacheDefinition1.xml"] = encoder.encode(
       definition.replace('type="worksheet"', 'type="external"'),
     );
-    const { daemon, artifact } = setup(zipSync(files));
+    const { daemon, artifact } = setup(zipFixture(files));
     const refused = await scanFixture(daemon, artifact);
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
@@ -181,5 +237,38 @@ describe("Issue #9 pivot-cache disclosure journey", () => {
     expect(refused.run?.state).toBe("refused");
     expect(refused.run?.repair_plan?.status).toBe("refused");
     expect(refused.run?.repair_plan?.refusal_reasons?.join(" ").toLowerCase()).toContain("external");
+  });
+
+  it("does not report a pivot cache when every reconstructed value is visible", async () => {
+    const { daemon, artifact } = setup(visibleSourceWithPrefixedRelationships());
+    const scanned = await scanFixture(daemon, artifact);
+    expect(scanned.ok).toBe(true);
+    if (!scanned.ok) return;
+    expect(scanned.run.scan?.findings).toEqual([]);
+    expect(scanned.run.repair_plan).toBeUndefined();
+  });
+
+  it("keeps one shared-item slot for an empty field before populated fields", async () => {
+    const { daemon, artifact } = setup(mixedFieldFixture());
+    const scanned = await scanFixture(daemon, artifact);
+    expect(scanned.ok).toBe(true);
+    if (!scanned.ok || !scanned.run.reveals?.[0]) return;
+    expect(daemon.readReveal(scanned.run.run_id, scanned.run.reveals[0].reference)?.rows[0]).toEqual({
+      worksheet: "Data",
+      row: 1,
+      values: ["10", "North", "Q1"],
+    });
+  });
+
+  it("uses the definition member as a stable location when records are unavailable", async () => {
+    const { daemon, artifact } = setup(missingRecordsRelationshipFixture());
+    const refused = await scanFixture(daemon, artifact);
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.code).toBe("repair_refused");
+    expect(refused.run?.scan?.findings).toEqual([
+      { mechanism: "pivot_cache", location: "xl/pivotCache/pivotCacheDefinition1.xml", count: 1 },
+    ]);
+    expect(refused.run?.repair_plan?.status).toBe("refused");
   });
 });
