@@ -1,6 +1,8 @@
 import {
   API_VERSION,
   MAX_ARTIFACT_BYTES,
+  MAX_WORKSHEET_COLUMNS,
+  MAX_WORKSHEET_ROWS,
   type ArtifactReference,
   type Command,
   type DisclosureBinding,
@@ -191,6 +193,21 @@ function parseStringArray(value: unknown, path: string, minimum = 0): string[] {
   return value.map((item, index) => stringValue(item, `${path}[${index}]`));
 }
 
+function parseCellReferenceArray(value: unknown, path: string): string[] {
+  const references = parseStringArray(value, path, 1);
+  if (references.some((reference) => {
+    const match = reference.match(/^([A-Z]{1,3})([1-9][0-9]*)$/);
+    if (!match) return true;
+    let column = 0;
+    for (const character of match[1]!) column = column * 26 + character.charCodeAt(0) - 64;
+    const row = Number(match[2]);
+    return column > MAX_WORKSHEET_COLUMNS || !Number.isSafeInteger(row) || row > MAX_WORKSHEET_ROWS;
+  })) {
+    throw new SchemaError(`${path} must contain uppercase A1-style cell references`);
+  }
+  return references;
+}
+
 function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
   const input = record(value, "repair_plan.dependency_analysis");
   const keys = [
@@ -210,13 +227,37 @@ function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
 
 function parseRepairAction(value: unknown, index: number): RepairAction {
   const input = record(value, `repair_plan.actions[${index}]`);
-  exactKeys(input, ["kind", "worksheet", "target_member", "changed_members", "capability_losses"], `repair_plan.actions[${index}]`);
+  const kind = enumValue(input.kind, ["delete_hidden_worksheet", "clear_hidden_cell_values", "clear_pivot_cache_values"] as const, `repair_plan.actions[${index}].kind`);
+  const path = `repair_plan.actions[${index}]`;
+  const commonKeys = ["kind", "worksheet", "target_member", "changed_members", "capability_losses"];
+  exactKeys(
+    input,
+    kind === "clear_hidden_cell_values"
+      ? [...commonKeys, "cell_references"]
+      : kind === "clear_pivot_cache_values"
+        ? [...commonKeys, "definition_member", "records_member"]
+        : commonKeys,
+    path,
+  );
+  const common = {
+    worksheet: stringValue(input.worksheet, `${path}.worksheet`),
+    target_member: stringValue(input.target_member, `${path}.target_member`),
+    changed_members: parseStringArray(input.changed_members, `${path}.changed_members`, 1),
+    capability_losses: parseStringArray(input.capability_losses, `${path}.capability_losses`, 1),
+  };
+  if (kind === "delete_hidden_worksheet") return { kind, ...common };
+  if (kind === "clear_pivot_cache_values") {
+    return {
+      kind,
+      ...common,
+      definition_member: stringValue(input.definition_member, `${path}.definition_member`),
+      records_member: stringValue(input.records_member, `${path}.records_member`),
+    };
+  }
   return {
-    kind: enumValue(input.kind, ["delete_hidden_worksheet"] as const, `repair_plan.actions[${index}].kind`),
-    worksheet: stringValue(input.worksheet, `repair_plan.actions[${index}].worksheet`),
-    target_member: stringValue(input.target_member, `repair_plan.actions[${index}].target_member`),
-    changed_members: parseStringArray(input.changed_members, `repair_plan.actions[${index}].changed_members`, 1),
-    capability_losses: parseStringArray(input.capability_losses, `repair_plan.actions[${index}].capability_losses`, 1),
+    kind,
+    ...common,
+    cell_references: parseCellReferenceArray(input.cell_references, `${path}.cell_references`),
   };
 }
 

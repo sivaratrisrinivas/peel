@@ -66,7 +66,7 @@ def test_production_engine_verifies_clean_artifact_without_optional_reader(tmp_p
 
     def import_without_openpyxl(name: str):
         if name == "openpyxl":
-            raise ImportError("optional reader unavailable")
+            raise ModuleNotFoundError("optional reader unavailable", name="openpyxl")
         return import_module(name)
 
     monkeypatch.setattr(daytona_engine.importlib, "import_module", import_without_openpyxl)
@@ -77,6 +77,26 @@ def test_production_engine_verifies_clean_artifact_without_optional_reader(tmp_p
     assert verified["artifact_unchanged"] is True
     assert verified["changed_members"] == []
     assert verified["reopened_with"] == ["python-zipfile", "xml.etree.ElementTree"]
+
+
+def test_production_engine_refuses_when_optional_reader_dependency_is_missing(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "clean.xlsx"
+    payload = _workbook(source)
+    digest = hashlib.sha256(payload).hexdigest()
+    import_module = daytona_engine.importlib.import_module
+
+    def import_with_missing_dependency(name: str):
+        if name == "openpyxl":
+            raise ModuleNotFoundError("dependency unavailable", name="et_xmlfile")
+        return import_module(name)
+
+    monkeypatch.setattr(daytona_engine.importlib, "import_module", import_with_missing_dependency)
+
+    verified = daytona_engine._verify_package(source, digest, digest)
+
+    assert verified["status"] == "refused"
+    assert verified["refusal_code"] == "integrity_failure"
+    assert verified["reopened_with"] == []
 
 
 def test_production_engine_refuses_when_optional_reader_cannot_reopen(tmp_path: Path, monkeypatch) -> None:

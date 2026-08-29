@@ -13,11 +13,10 @@ This repository packages the two core journeys in scope for the hackathon:
   analysis proves it safe, one atomic Repair Plan followed by Verification.
 
 The completed and verified Gmail Mailbox Trigger from issue [#7] is an optional
-supported intake route; the manual trigger remains the fallback. Optional
-hidden rows or columns and pivot-cache journeys are cuts. Issue [#8] and issue
-[#9] remain open, so they are not included in the supported scope or the
-demonstration. Sensitive Reveal values are also cut; only metadata and an
-ephemeral, local Reveal Reference are supported.
+supported intake route; the manual trigger remains the fallback. The completed
+optional hidden-row/column and pivot-cache journeys from issues [#8] and [#9]
+are supported within their documented limits. Sensitive Reveal values are cut;
+only metadata and an ephemeral, local Reveal Reference are supported.
 
 ## Supported scope
 
@@ -27,9 +26,9 @@ external connections, unknown content-bearing members, malformed packages,
 unsupported extensions, and any unproven fidelity result in Refusal. A clean
 artifact is disclosed without rewriting its bytes.
 
-The supported deterministic Finding is `hidden_worksheet`. Hidden rows or
-columns and pivot-cache values are not claimed as supported coverage: a
-qualification run must not use those fixtures, and an artifact containing an
+The supported deterministic Findings cover hidden worksheets, hidden rows and
+columns, and the documented worksheet-sourced pivot-cache case. Each mechanism
+has explicit dependency and fidelity limits; an artifact containing an
 unsupported or unproven mechanism must not be presented as globally clean.
 The Scope Assessment is advisory and one-way: `no_mismatch_found` means only
 that no mismatch was found in bounded evidence; `mismatch` or
@@ -99,8 +98,18 @@ documented in [`docs/runbook.md`](docs/runbook.md).
 
 The prior core live proof is recorded in [the issue #4 verification
 comment](https://github.com/sivaratrisrinivas/peel/issues/4#issuecomment-5458840107).
-Issue #10 still requires the two-rehearsal wrapper above for the final
-Demo-ready decision.
+The final issue #10 qualification passed on 2026-08-30 in WSL2/Ubuntu: two
+complete rehearsals returned `demo_ready` with unchanged code and configuration.
+The bounded records remain outside the repository under `/tmp`.
+
+## Why and how submission qualification works
+
+Submission qualification turns the working scope into a repeatable demo proof.
+It checks the real mailbox, TrueForge/Cerebras, Daytona, approval, SMTP, and
+recipient boundaries instead of relying on local test doubles. The wrapper
+runs the live clean-workbook journey twice, while the privacy checker audits
+all retained surfaces and repository hygiene. Both commands fail closed and
+write only bounded metadata.
 
 ## Privacy qualification
 
@@ -134,6 +143,19 @@ or repository hygiene violation blocks the qualification. The corpus and raw
 attachment remain outside the repository and are removed after the private
 review.
 
+The transformer edits only the planned workbook, relationship, and worksheet
+relationship members. It also edits the content-types member when it must
+remove a worksheet-specific override. Untouched ZIP member payloads stay
+byte-for-byte identical. Verification reruns every enabled Attack, validates
+relationships and content types, checks the visible-content baseline, and
+reopens the candidate with the available readers. Any remaining Finding,
+unexplained member change, parse failure, or reopen failure destroys the
+candidate and ends the Run in Refusal. Hidden-row and hidden-column value
+handling is described in issue #8 below. Pivot-cache support is limited to a
+worksheet-sourced cache whose cached values are absent from visible worksheets;
+external caches and unsupported OOXML extensions remain outside this supported
+profile.
+
 ## Manual fallback and recovery
 
 If mailbox polling is unavailable, the documented fallback is to upload the
@@ -142,6 +164,68 @@ strict `stage` command containing the same envelope and Artifact Reference.
 The public HTTP and MCP boundaries use the same versioned command contract.
 The mailbox watcher is optional and never scans, Repairs, authorizes, or
 discloses an artifact itself.
+
+## Issue #8: hidden row and column values
+
+Peel scans values in hidden rows and columns and reports them as Findings,
+even when the workbook may have a legitimate reason to hide them. Reveal uses
+the same privacy and Scope Assessment checks as hidden worksheets. It is off by
+default. When enabled, it stays local, expires after 60 seconds, and never puts
+values in Run/MCP responses, SQLite, logs, or reports.
+
+Peel can clear a concealed value only when it can prove that no supported
+workbook feature uses it. The Repair Plan lists each exact cell and requires a
+new native Repair Approval bound to the Run, revision, original Artifact
+Reference, plan hash, and engine version. The dependency check covers visible
+formulas, defined names, data validation, tables, charts, pivots, and package
+relationships. Any dependency causes a visible Refusal.
+
+For a concealed-cell action, the Repair changes only the planned worksheet
+member. It keeps hidden dimensions, formatting, the original Artifact
+Reference, and unrelated OOXML members. A mixed plan can also delete a hidden
+worksheet; that action lists the affected workbook metadata, relationships,
+content types, and worksheet members explicitly. Verification runs every
+enabled Attack, checks the visible workbook content, and reopens the candidate.
+Malformed or otherwise unprovable packages are refused before Repair.
+
+Qodo reviewed [PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
+and reported zero bugs, rule violations, and skill insights. The review found
+issues in shared-string handling, whole-range and 3-D references, missing cell
+references, malformed XML, runtime validation, duplicate attributes, grid
+bounds, defined-name scope, and mixed repair scope. The fixes are covered by
+tests. No findings were dismissed or deferred.
+
+## Issue #9: pivot-cache disclosure
+
+Peel detects recoverable worksheet-sourced pivot-cache values when the source
+worksheet is absent or hidden from the visible workbook. The Finding identifies
+the cache-records member and count without exposing values in Run metadata.
+When Reveal is enabled, at most five reconstructed rows are held locally for
+60 seconds. A fresh native Repair Approval is required before Peel clears the
+cache records and shared items.
+
+Repair changes only the approved cache definition and records members. It
+preserves the pivot table and every unrelated ZIP member, then reruns the
+Attack, relationship/content-type checks, visible-content baseline, and package
+reopen checks. External cache sources and incomplete or malformed cache
+structures are refused.
+
+The public fixture provenance and derivation are recorded in
+[`docs/evidence/pivot-cache-fixture-2026-08-29.md`](docs/evidence/pivot-cache-fixture-2026-08-29.md).
+
+Qodo's [initial review of PR #18](https://github.com/sivaratrisrinivas/peel/pull/18#issuecomment-5464175904)
+found six High correctness bugs. The fixes are in commit `b1bc9bf`, covering
+concealed cells, missing-record locations, cache-only proof, self-closing XML,
+namespace prefixes, and cache-field alignment. Qodo's [follow-up on that
+commit](https://github.com/sivaratrisrinivas/peel/pull/18#issuecomment-5464175904)
+reports zero bugs, rule violations, and skill insights. No findings were
+dismissed or deferred.
+
+Qodo reviewed [PR #14](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460451535)
+and found zero bugs, rule violations, or requirement gaps. Its [final pass](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460483810)
+also found none. No findings were dismissed or deferred.
+
+## Current status
 
 Stop on any `failed`, `refused`, or `delivery_unknown` outcome. Preserve its
 bounded evidence and failure code. A restart invalidates pending approvals; a
@@ -193,6 +277,14 @@ The current architecture and environment decision is
 [ADR-0026](docs/adr/0026-current-architecture-and-environment-gate.md). The
 full runbook is [`docs/runbook.md`](docs/runbook.md). The project is released
 under the [MIT License](LICENSE).
+
+Three optional routes remain cuts. Sensitive Reveal values stay metadata-only
+until a private transport and retention path is proven. LibreOffice-dependent
+reopen checks remain cut because no supported binary was available on the gate
+host. The issue #8 focused suites include deterministic pivot dependency
+fixtures; a trusted raw `.xlsx` fixture with complete pivot-cache parts remains
+cut because neither the repository nor the connected Drive account provided
+one.
 
 ## Deterministic checks
 

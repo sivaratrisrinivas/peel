@@ -2,10 +2,13 @@ import { unzipSync } from "fflate";
 
 import {
   ENGINE_VERSION,
+  MAX_WORKSHEET_COLUMNS,
+  MAX_WORKSHEET_ROWS,
   type DependencyAnalysis,
   type EngineScanResult,
   type EngineVerifyResult,
   type Finding,
+  type RevealRow,
   type RepairAction,
   type RepairPlan,
 } from "./contracts.js";
@@ -21,18 +24,42 @@ interface SheetInfo {
   path: string;
 }
 
+interface CellInfo {
+  reference: string;
+  column: number;
+  row: number;
+}
+
 interface PackageInspection {
   files: Record<string, Uint8Array>;
   sheets: SheetInfo[];
   findings: Finding[];
   profileAccepted: boolean;
   unknownMembers: string[];
+  pivotCaches: PivotCacheInfo[];
   plan?: RepairPlan;
+}
+
+interface PivotCacheInfo {
+  definitionMember: string;
+  recordsMember: string;
+  sourceSheet: string;
+  supported: boolean;
+  refusalReason?: string;
+  rows: RevealRow[];
+  cacheOnlyCount: number;
 }
 
 function xmlAttribute(attributes: string, name: string): string | undefined {
   const escaped = name.replace(":", "\\:");
   return attributes.match(new RegExp(`(?:^|\\s)${escaped}=["']([^"']*)["']`, "i"))?.[1];
+}
+
+function xmlAttributeByLocalName(attributes: string, name: string): string | undefined {
+  for (const match of attributes.matchAll(/\s([A-Za-z_][\w.:-]*)=["']([^"']*)["']/g)) {
+    if (match[1]!.split(":").pop()?.toLowerCase() === name.toLowerCase()) return match[2];
+  }
+  return undefined;
 }
 
 function decodeXml(value: string): string {
@@ -107,7 +134,7 @@ function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
   const relationships = workbookRelationshipMap(files);
   return Array.from(workbook.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => {
     const attributes = match[1] ?? "";
-    const relationshipId = xmlAttribute(attributes, "r:id") ?? xmlAttribute(attributes, "id") ?? "";
+    const relationshipId = xmlAttributeByLocalName(attributes, "id") ?? "";
     return {
       name: decodeXml(xmlAttribute(attributes, "name") ?? ""),
       state: xmlAttribute(attributes, "state")?.toLowerCase() ?? "visible",
@@ -115,6 +142,125 @@ function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
       path: relationships.get(relationshipId) ?? "",
     };
   });
+}
+
+function setXmlAttribute(opening: string, name: string, value: string): string {
+  const pattern = new RegExp(`(\\s${name.replace(":", "\\:")}=["'])([^"']*)(["'])`, "i");
+  if (pattern.test(opening)) return opening.replace(pattern, `$1${value}$3`);
+  return opening.replace(/\s*\/>$/, ` ${name}="${value}"/>`).replace(/\s*>$/, ` ${name}="${value}">`);
+}
+
+function removeXmlAttributes(opening: string, names: readonly string[]): string {
+  let result = opening;
+  for (const name of names) {
+    result = result.replace(new RegExp(`\\s${name.replace(":", "\\:")}=["'][^"']*["']`, "gi"), "");
+  }
+  return result;
+}
+
+function pivotValueElements(xml: string): string[] {
+  const values: string[] = [];
+  const pattern = new RegExp(
+    `<${localElement("s|n|d|b|e|m")}\\b([^>]*?)(?:\\/\\>|>([\\s\\S]*?)<\\/${localElement("s|n|d|b|e|m")}>)`,
+    "gi",
+  );
+  for (const match of xml.matchAll(pattern)) {
+    values.push(decodeXml(xmlAttribute(match[1] ?? "", "v") ?? (match[2] ?? "").replace(/<[^>]+>/g, "")));
+  }
+  return values;
+}
+
+function pivotRecordRows(xml: string, sharedItems: readonly string[][]): RevealRow[] {
+  const rows: RevealRow[] = [];
+  const rowPattern = new RegExp(`<${localElement("r")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("r")}>`, "gi");
+  const valuePattern = new RegExp(`<${localElement("x|s|n|d|b|e|m")}\\b([^>]*?)(?:\\/\\>|>([\\s\\S]*?)<\\/${localElement("x|s|n|d|b|e|m")}>)`, "gi");
+  for (const rowMatch of xml.matchAll(rowPattern)) {
+    const values: string[] = [];
+    for (const valueMatch of (rowMatch[1] ?? "").matchAll(valuePattern)) {
+      const tag = valueMatch[0]!.match(/^<(?:(?:[A-Za-z_][\w.-]*):)?([A-Za-z_][\w.-]*)/i)?.[1]?.toLowerCase();
+      const raw = decodeXml(xmlAttribute(valueMatch[1] ?? "", "v") ?? (valueMatch[2] ?? "").replace(/<[^>]+>/g, ""));
+      if (tag === "x") {
+        const index = Number(raw);
+        const field = sharedItems[values.length];
+        if (!Number.isSafeInteger(index) || !field || index < 0 || index >= field.length) return [];
+        values.push(field[index]!);
+      } else {
+        values.push(raw);
+      }
+    }
+    rows.push({ worksheet: "pivot-cache", row: rows.length + 1, values });
+  }
+  return rows;
+}
+
+function visibleWorksheetValues(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Set<string> {
+  const values = new Set<string>();
+  const sharedStrings = Array.from(
+    decoder.decode(files["xl/sharedStrings.xml"] ?? new Uint8Array()).matchAll(
+      new RegExp(`<${localElement("si")}\\b([\\s\\S]*?)<\\/${localElement("si")}>`, "gi"),
+    ),
+  ).map((match) => decodeXml(Array.from((match[1] ?? "").matchAll(new RegExp(`<${localElement("t")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("t")}>`, "gi"))).map((text) => text[1] ?? "").join("")));
+  const pattern = new RegExp(`<${localElement("c")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("c")}>`, "gi");
+  for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
+    const xml = decoder.decode(files[sheet.path] ?? new Uint8Array());
+    const concealed = new Set(concealedCells(xml).map((cell) => cell.reference));
+    const unresolved = unresolvedConcealedValues(xml);
+    for (const cell of xml.matchAll(pattern)) {
+      const attributes = cell[0]!.match(new RegExp(`<${localElement("c")}\\b([^>]*)`, "i"))?.[1] ?? "";
+      const reference = cellInfo(xmlAttributeByLocalName(attributes, "r") ?? "")?.reference;
+      if ((reference !== undefined && concealed.has(reference)) || (reference === undefined && unresolved > 0)) continue;
+      const content = cell[1] ?? "";
+      const value = content.match(new RegExp(`<${localElement("v|t")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("v|t")}>`, "i"))?.[1];
+      if (value !== undefined) {
+        const decoded = decodeXml(value);
+        const sharedIndex = xmlAttribute(attributes, "t")?.toLowerCase() === "s" ? Number(decoded) : -1;
+        values.add(sharedIndex >= 0 && sharedStrings[sharedIndex] !== undefined ? sharedStrings[sharedIndex]! : decoded);
+      }
+    }
+  }
+  return values;
+}
+
+function inspectPivotCaches(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): PivotCacheInfo[] {
+  const relationships = relationshipEntries(files);
+  const visibleValues = visibleWorksheetValues(files, sheets);
+  const caches: PivotCacheInfo[] = [];
+  for (const definitionMember of Object.keys(files).filter((name) => /^xl\/pivotCache\/pivotCacheDefinition[^/]*\.xml$/i.test(name)).sort()) {
+    const definitionXml = decoder.decode(files[definitionMember]!);
+    const cacheSource = definitionXml.match(new RegExp(`<${localElement("cacheSource")}\\b([^>]*)`, "i"));
+    const sharedItems = Array.from(definitionXml.matchAll(new RegExp(`<${localElement("cacheField")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("cacheField")}>)`, "gi"))).map((field) => {
+      const shared = field[0]!.match(new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "i"));
+      return pivotValueElements(shared?.[0] ?? "");
+    });
+    const recordsRelation = relationships.find((relation) => relation.source === definitionMember && relation.type.toLowerCase().includes("pivotcacherecords"));
+    const recordsMember = recordsRelation?.target ?? "";
+    const recordXml = recordsMember ? decoder.decode(files[recordsMember] ?? new Uint8Array()) : "";
+    const rows = pivotRecordRows(recordXml, sharedItems);
+    const hasData = rows.length > 0 || sharedItems.some((field) => field.length > 0);
+    if (!hasData) continue;
+    const sourceType = xmlAttribute(cacheSource?.[1] ?? "", "type")?.toLowerCase();
+    const sourceSheet = definitionXml.match(new RegExp(`<${localElement("worksheetSource")}\\b([^>]*)`, "i"))?.[1];
+    const sourceName = decodeXml(xmlAttribute(sourceSheet ?? "", "sheet") ?? "pivot-cache");
+    let refusalReason: string | undefined;
+    if (sourceType !== "worksheet") refusalReason = `Pivot cache ${definitionMember} uses unsupported cache source type ${sourceType ?? "unknown"}.`;
+    else if (!sourceSheet) refusalReason = `Pivot cache ${definitionMember} has no worksheet source reference.`;
+    else if (!recordsMember || !files[recordsMember]) refusalReason = `Pivot cache ${definitionMember} has no supported pivotCacheRecords relationship.`;
+    else if (!new RegExp(`^\\s*<${localElement("pivotCacheRecords")}\\b`, "i").test(recordXml)) refusalReason = `Pivot cache ${definitionMember} does not point to a pivotCacheRecords part.`;
+    else if (sharedItems.length === 0 || rows.length === 0) refusalReason = `Pivot cache ${definitionMember} has incomplete cache fields or records.`;
+    const source = sheets.find((sheet) => normalizedSheetName(sheet.name) === normalizedSheetName(sourceName));
+    const cacheOnlyCount = refusalReason ? Math.max(rows.length, 1) : rows.filter((row) => !source || source.state === "hidden" || row.values.some((value) => !visibleValues.has(value))).length;
+    if (cacheOnlyCount === 0 && !refusalReason) continue;
+    caches.push({
+      definitionMember,
+      recordsMember,
+      sourceSheet: sourceName,
+      supported: !refusalReason,
+      ...(refusalReason ? { refusalReason } : {}),
+      rows: rows.map((row) => ({ ...row, worksheet: sourceName })),
+      cacheOnlyCount,
+    });
+  }
+  return caches;
 }
 
 function allowedProfilePart(name: string): boolean {
@@ -133,11 +279,56 @@ function allowedProfilePart(name: string): boolean {
     name.startsWith("xl/drawings/") && (name.endsWith(".xml") || name.endsWith(".rels")) ||
     name.startsWith("xl/charts/") && name.endsWith(".xml") ||
     name.startsWith("xl/pivotTables/") && name.endsWith(".xml") ||
+    name.startsWith("xl/pivotTables/_rels/") && name.endsWith(".rels") ||
     name.startsWith("xl/pivotCache/") && name.endsWith(".xml") ||
+    name.startsWith("xl/pivotCache/_rels/") && name.endsWith(".rels") ||
     name.startsWith("xl/externalLinks/") && (name.endsWith(".xml") || name.endsWith(".rels")) ||
     name === "xl/connections.xml" ||
     name === "xl/vbaProject.bin"
   );
+}
+
+function xmlWellFormed(xml: string): boolean {
+  const source = xml
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
+    .replace(/<\?[\s\S]*?\?>/g, "")
+    .replace(/<!DOCTYPE[\s\S]*?>/gi, "");
+  const stack: string[] = [];
+  let roots = 0;
+  let cursor = 0;
+  const tags = /<\/?([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s[^<>]*?)?\/?>/g;
+  for (const match of source.matchAll(tags)) {
+    const text = source.slice(cursor, match.index);
+    if (stack.length === 0 ? text.trim().length > 0 : text.includes("<") || /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);)/i.test(text)) return false;
+    const full = match[0] ?? "";
+    const name = match[1]!.toLowerCase();
+    const body = full.slice(full.startsWith("</") ? 2 : 1, full.endsWith("/>") ? -2 : -1).trim();
+    const attributes = body.slice(match[1]!.length);
+    if (full.startsWith("</")) {
+      if (attributes.trim().length > 0) return false;
+    } else {
+      const attributePattern = /\s+([A-Za-z_][\w.:-]*)\s*=\s*("[^"]*"|'[^']*')/g;
+      let attributeCursor = 0;
+      const attributeNames = new Set<string>();
+      for (const attribute of attributes.matchAll(attributePattern)) {
+        if (attributes.slice(attributeCursor, attribute.index).trim().length > 0) return false;
+        if (attributeNames.has(attribute[1]!)) return false;
+        attributeNames.add(attribute[1]!);
+        attributeCursor = (attribute.index ?? 0) + attribute[0].length;
+      }
+      if (attributes.slice(attributeCursor).trim().length > 0) return false;
+    }
+    if (full.startsWith("</")) {
+      if (stack.pop() !== name) return false;
+    } else {
+      if (stack.length === 0 && ++roots > 1) return false;
+      if (!/\/\s*>$/.test(full)) stack.push(name);
+    }
+    cursor = (match.index ?? 0) + full.length;
+  }
+  const trailing = source.slice(cursor);
+  return stack.length === 0 && roots === 1 && trailing.trim().length === 0 && /<[A-Za-z_]/.test(source);
 }
 
 function unique(values: readonly string[]): string[] {
@@ -146,6 +337,229 @@ function unique(values: readonly string[]): string[] {
 
 function localElement(element: string): string {
   return `(?:[A-Za-z_][\\w.-]*:)?(?:${element})`;
+}
+
+function cellColumn(column: string): number {
+  let result = 0;
+  for (const character of column.toUpperCase()) result = result * 26 + character.charCodeAt(0) - 64;
+  return result;
+}
+
+function cellInfo(reference: string): CellInfo | undefined {
+  const match = reference.match(/^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$/i);
+  if (!match) return undefined;
+  const column = cellColumn(match[1]!);
+  const row = Number(match[2]);
+  return Number.isSafeInteger(row) && row <= MAX_WORKSHEET_ROWS && column > 0 && column <= MAX_WORKSHEET_COLUMNS
+    ? { reference: `${match[1]!.toUpperCase()}${row}`, column, row }
+    : undefined;
+}
+
+function hiddenDimensionRanges(xml: string): { rows: Set<number>; columns: Array<[number, number]> } {
+  const rows = new Set<number>();
+  for (const match of xml.matchAll(new RegExp(`<${localElement("row")}\\b([^>]*)\\/?>(?:<\\/${localElement("row")}>)?`, "gi"))) {
+    const attributes = match[1] ?? "";
+    if (!/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const row = Number(xmlAttribute(attributes, "r"));
+    if (Number.isSafeInteger(row) && row > 0) rows.add(row);
+  }
+  const columns: Array<[number, number]> = [];
+  for (const match of xml.matchAll(new RegExp(`<${localElement("col")}\\b([^>]*)\\/?>(?:<\\/${localElement("col")}>)?`, "gi"))) {
+    const attributes = match[1] ?? "";
+    if (!/(?:^|\s)hidden=["'](?:1|true)["']/i.test(attributes)) continue;
+    const minimum = Number(xmlAttribute(attributes, "min"));
+    const maximum = Number(xmlAttribute(attributes, "max"));
+    if (Number.isSafeInteger(minimum) && Number.isSafeInteger(maximum) && minimum > 0 && maximum >= minimum) {
+      columns.push([minimum, maximum]);
+    }
+  }
+  return { rows, columns };
+}
+
+function cellHasValue(content: string): boolean {
+  return new RegExp(`<${localElement("f|v|is")}\\b`, "i").test(content);
+}
+
+function concealedCellSummary(xml: string): { cells: CellInfo[]; unresolved: number } {
+  const dimensions = hiddenDimensionRanges(xml);
+  const cells: CellInfo[] = [];
+  let unresolved = 0;
+  const rowPattern = new RegExp(`<${localElement("row")}\\b([^>]*)>([\\s\\S]*?)</${localElement("row")}>`, "gi");
+  const cellPattern = new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)</${localElement("c")}>)`, "gi");
+  for (const rowMatch of xml.matchAll(rowPattern)) {
+    const rowAttributes = rowMatch[1] ?? "";
+    const rowHidden = /(?:^|\s)hidden=["'](?:1|true)["']/i.test(rowAttributes);
+    for (const cellMatch of (rowMatch[2] ?? "").matchAll(cellPattern)) {
+      if (!cellHasValue(cellMatch[2] ?? "")) continue;
+      const reference = cellInfo(xmlAttribute(cellMatch[1] ?? "", "r") ?? "");
+      const hiddenColumn = reference !== undefined && dimensions.columns.some(([minimum, maximum]) => reference.column >= minimum && reference.column <= maximum);
+      if (!rowHidden && !hiddenColumn && !(reference === undefined && dimensions.columns.length > 0)) continue;
+      if (reference === undefined) unresolved += 1;
+      else cells.push(reference);
+    }
+  }
+  return { cells: cells.sort((left, right) => left.row - right.row || left.column - right.column), unresolved };
+}
+
+function concealedCells(xml: string): CellInfo[] {
+  return concealedCellSummary(xml).cells;
+}
+
+function unresolvedConcealedValues(xml: string): number {
+  return concealedCellSummary(xml).unresolved;
+}
+
+function sharedStringCells(xml: string, cells: readonly string[]): string[] {
+  const targets = new Set(cells.map((reference) => cellInfo(reference)?.reference).filter((reference): reference is string => reference !== undefined));
+  return Array.from(xml.matchAll(new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>[\\s\\S]*?<\\/${localElement("c")}>)`, "gi")))
+    .filter((match) => xmlAttribute(match[1] ?? "", "t")?.toLowerCase() === "s")
+    .map((match) => cellInfo(xmlAttribute(match[1] ?? "", "r") ?? "")?.reference)
+    .filter((reference): reference is string => reference !== undefined && targets.has(reference));
+}
+
+function concealedCellsByWorksheet(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const sheet of sheets) {
+    if (!sheet.path || !files[sheet.path]) continue;
+    const cells = concealedCells(decoder.decode(files[sheet.path]!)).map((cell) => cell.reference);
+    if (cells.length > 0) result[sheet.path] = cells;
+  }
+  return result;
+}
+
+function unresolvedConcealedValuesByWorksheet(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const sheet of sheets) {
+    if (!sheet.path || !files[sheet.path]) continue;
+    const count = unresolvedConcealedValues(decoder.decode(files[sheet.path]!));
+    if (count > 0) result[sheet.path] = count;
+  }
+  return result;
+}
+
+function cellInRange(reference: CellInfo, start: CellInfo, end: CellInfo): boolean {
+  return reference.row >= Math.min(start.row, end.row) && reference.row <= Math.max(start.row, end.row) &&
+    reference.column >= Math.min(start.column, end.column) && reference.column <= Math.max(start.column, end.column);
+}
+
+function columnRangeContainsTargets(targets: readonly CellInfo[], start: string, end: string): boolean {
+  const minimum = cellColumn(start);
+  const maximum = cellColumn(end);
+  return targets.some((target) => target.column >= Math.min(minimum, maximum) && target.column <= Math.max(minimum, maximum));
+}
+
+function rowRangeContainsTargets(targets: readonly CellInfo[], start: string, end: string): boolean {
+  const minimum = Number(start);
+  const maximum = Number(end);
+  return targets.some((target) => target.row >= Math.min(minimum, maximum) && target.row <= Math.max(minimum, maximum));
+}
+
+function normalizedSheetName(name: string): string {
+  return name.replace(/''/g, "'").trim().toLowerCase();
+}
+
+function sheetInSpan(
+  sheet: SheetInfo,
+  first: string,
+  last: string,
+  sheetOrder: readonly SheetInfo[],
+): boolean {
+  const targetIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(sheet.name));
+  const firstIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(first));
+  const lastIndex = sheetOrder.findIndex((candidate) => normalizedSheetName(candidate.name) === normalizedSheetName(last));
+  if (targetIndex >= 0 && firstIndex >= 0 && lastIndex >= 0) {
+    return targetIndex >= Math.min(firstIndex, lastIndex) && targetIndex <= Math.max(firstIndex, lastIndex);
+  }
+  return normalizedSheetName(first) === normalizedSheetName(sheet.name) || normalizedSheetName(last) === normalizedSheetName(sheet.name);
+}
+
+function escapedRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function threeDimensionalRangeContainsTargets(
+  text: string,
+  sheet: SheetInfo,
+  targets: readonly CellInfo[],
+  sheetOrder: readonly SheetInfo[],
+  range: "cells" | "columns" | "rows",
+): boolean {
+  for (const first of sheetOrder) {
+    for (const last of sheetOrder) {
+      if (first.path === last.path || !sheetInSpan(sheet, first.name, last.name, sheetOrder)) continue;
+      const prefixes = [
+        `'${escapedRegex(first.name.replace(/'/g, "''"))}:${escapedRegex(last.name.replace(/'/g, "''"))}'!`,
+        `(?<![A-Za-z0-9_])${escapedRegex(first.name)}:${escapedRegex(last.name)}!`,
+      ];
+      const suffix = range === "cells"
+        ? "\\$?([A-Z]{1,3})\\$?([1-9][0-9]*)(?::\\$?([A-Z]{1,3})\\$?([1-9][0-9]*))?"
+        : range === "columns"
+          ? "\\$?([A-Z]{1,3}):\\$?([A-Z]{1,3})"
+          : "\\$?([1-9][0-9]*):\\$?([1-9][0-9]*)";
+      for (const prefix of prefixes) {
+        for (const match of text.matchAll(new RegExp(prefix + suffix, "gi"))) {
+          if (range === "columns" && columnRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+          if (range === "rows" && rowRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+          if (range === "cells") {
+            const start = cellInfo(`${match[1]}${match[2]}`);
+            const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
+            if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function referencesCells(
+  text: string,
+  sheet: SheetInfo,
+  cells: readonly string[],
+  currentSheetPath?: string,
+  allowUnqualifiedWhenUnknownSheet = false,
+  sheetOrder: readonly SheetInfo[] = [],
+): boolean {
+  if (cells.length === 0) return false;
+  const decoded = decodeXml(text);
+  const targets = cells.map(cellInfo).filter((cell): cell is CellInfo => cell !== undefined);
+  const qualifiedSheetPrefix = `(?:'${escapedRegex(sheet.name.replace(/'/g, "''"))}'|(?<![A-Za-z0-9_])${escapedRegex(sheet.name)})!`;
+  const referencePattern = new RegExp(
+    `${qualifiedSheetPrefix}\\$?([A-Z]{1,3})\\$?([1-9][0-9]*)(?::\\$?([A-Z]{1,3})\\$?([1-9][0-9]*))?`,
+    "gi",
+  );
+  for (const match of decoded.matchAll(referencePattern)) {
+    const start = cellInfo(`${match[1]}${match[2]}`);
+    const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  if (threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "cells") ||
+    threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "columns") ||
+    threeDimensionalRangeContainsTargets(decoded, sheet, targets, sheetOrder, "rows")) return true;
+  const qualifiedColumnPattern = new RegExp(`${qualifiedSheetPrefix}\\$?([A-Z]{1,3}):\\$?([A-Z]{1,3})`, "gi");
+  for (const match of decoded.matchAll(qualifiedColumnPattern)) {
+    if (columnRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+  }
+  const qualifiedRowPattern = new RegExp(`${qualifiedSheetPrefix}\\$?([1-9][0-9]*):\\$?([1-9][0-9]*)`, "gi");
+  for (const match of decoded.matchAll(qualifiedRowPattern)) {
+    if (rowRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+  }
+  if (currentSheetPath !== sheet.path && !allowUnqualifiedWhenUnknownSheet) return false;
+  const localPattern = /(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localPattern)) {
+    const start = cellInfo(`${match[1]}${match[2]}`);
+    const end = cellInfo(`${match[3] ?? match[1]}${match[4] ?? match[2]}`);
+    if (start && end && targets.some((target) => cellInRange(target, start, end))) return true;
+  }
+  const localColumnPattern = /(?:^|[^A-Za-z0-9_])\$?([A-Z]{1,3}):\$?([A-Z]{1,3})(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localColumnPattern)) {
+    if (columnRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+  }
+  const localRowPattern = /(?:^|[^A-Za-z0-9_])\$?([1-9][0-9]*):\$?([1-9][0-9]*)(?![A-Za-z0-9_])/gi;
+  for (const match of decoded.matchAll(localRowPattern)) {
+    if (rowRangeContainsTargets(targets, match[1]!, match[2]!)) return true;
+  }
+  return false;
 }
 
 function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
@@ -163,6 +577,66 @@ function matchingElements(xml: string, element: string, sheet: SheetInfo): boole
     if (includesSheetReference(match[0] ?? "", sheet)) return true;
   }
   return false;
+}
+
+function matchingElementsForCells(
+  xml: string,
+  element: string,
+  sheet: SheetInfo,
+  cells: readonly string[],
+  currentSheetPath?: string,
+  allowUnqualifiedWhenUnknownSheet = false,
+  sheetOrder: readonly SheetInfo[] = [],
+): boolean {
+  const pattern = "<" + localElement(element) + "\\b[^>]*(?:/>|>[\\s\\S]*?</" + localElement(element) + ">)";
+  for (const match of xml.matchAll(new RegExp(pattern, "gi"))) {
+    const elementXml = match[0] ?? "";
+    if (element.toLowerCase() === "definedname") {
+      const attributes = elementXml.match(new RegExp("<" + localElement(element) + "\\b([^>]*)", "i"))?.[1] ?? "";
+      const localSheetId = xmlAttribute(attributes, "localSheetId");
+      if (localSheetId !== undefined) {
+        const index = Number(localSheetId);
+        if (!Number.isInteger(index) || index < 0 || !sheetOrder[index]) return true;
+        if (sheetOrder[index]!.path !== sheet.path) continue;
+        if (referencesCells(elementXml, sheet, cells, sheet.path, false, sheetOrder)) return true;
+      } else if (referencesCells(elementXml, sheet, cells, undefined, true, sheetOrder)) {
+        // Workbook-scoped relative names have no owning worksheet. Refuse
+        // conservatively whenever their coordinates could name a target.
+        return true;
+      }
+      continue;
+    }
+    if (referencesCells(elementXml, sheet, cells, currentSheetPath, allowUnqualifiedWhenUnknownSheet, sheetOrder)) return true;
+  }
+  return false;
+}
+
+function relationshipPathToWorksheet(
+  member: string,
+  worksheet: string,
+  relationships: readonly { source: string; target: string; member: string }[],
+): string[] | undefined {
+  if (member === worksheet) return [];
+  let current = member;
+  const seen = new Set<string>();
+  const path: string[] = [];
+  while (!seen.has(current)) {
+    seen.add(current);
+    const relation = relationships.find((candidate) => candidate.target === current);
+    if (!relation) return undefined;
+    path.push(relation.member);
+    if (relation.source === worksheet) return path;
+    current = relation.source;
+  }
+  return undefined;
+}
+
+function memberIsRelatedToWorksheet(
+  member: string,
+  worksheet: string,
+  relationships: readonly { source: string; target: string; member: string }[],
+): boolean {
+  return relationshipPathToWorksheet(member, worksheet, relationships) !== undefined;
 }
 
 function hasMacro(files: Record<string, Uint8Array>): boolean {
@@ -218,6 +692,37 @@ function actionFor(sheet: SheetInfo, files: Record<string, Uint8Array>): RepairA
   };
 }
 
+function clearActionFor(sheet: SheetInfo, cells: readonly string[]): RepairAction {
+  return {
+    kind: "clear_hidden_cell_values",
+    worksheet: sheet.name,
+    target_member: sheet.path,
+    cell_references: [...cells],
+    changed_members: [sheet.path],
+    capability_losses: [
+      "The concealed values in worksheet " + sheet.name + " at " + cells.join(", ") + " will be cleared.",
+      "The hidden row and column dimensions, cell formatting, formulas outside these cells, and unrelated package members are preserved.",
+      "The cleared values cannot be restored from the repaired artifact; the original Artifact Reference remains unchanged.",
+    ],
+  };
+}
+
+function clearPivotCacheAction(cache: PivotCacheInfo): RepairAction {
+  return {
+    kind: "clear_pivot_cache_values",
+    worksheet: cache.sourceSheet,
+    target_member: cache.recordsMember,
+    definition_member: cache.definitionMember,
+    records_member: cache.recordsMember,
+    changed_members: [cache.definitionMember, cache.recordsMember].sort(),
+    capability_losses: [
+      `Cached pivot values from ${cache.sourceSheet} will be cleared from ${cache.definitionMember} and ${cache.recordsMember}.`,
+      "Pivot filtering, drill-through, refresh, and interactive behavior that depends on cached source values may be lost.",
+      "The original Artifact Reference remains unchanged and retains the recoverable cache values.",
+    ],
+  };
+}
+
 function hasContentTypeOverride(files: Record<string, Uint8Array>, target: string): boolean {
   const xml = decoder.decode(files["[Content_Types].xml"] ?? new Uint8Array());
   for (const match of xml.matchAll(new RegExp(`<${localElement("Override")}\\b([^>]*)\\/?>(?:<\\/${localElement("Override")}>)?`, "gi"))) {
@@ -234,9 +739,12 @@ function buildPlan(
   artifactSha256: string,
   engineVersion: string,
   unknownMembers: readonly string[],
+  unresolvedByWorksheet: Record<string, number>,
+  pivotCaches: readonly PivotCacheInfo[],
 ): RepairPlan | undefined {
   const hidden = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
-  if (hidden.length === 0) return undefined;
+  const concealedByWorksheet = concealedCellsByWorksheet(files, sheets);
+  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0 && Object.keys(unresolvedByWorksheet).length === 0 && pivotCaches.length === 0) return undefined;
   const relationships = relationshipEntries(files);
   const dependencies = emptyDependencies();
   const reasons: string[] = [];
@@ -258,8 +766,13 @@ function buildPlan(
   if (unknownMembers.length > 0) reasons.push(`Unsupported content-bearing package members: ${unknownMembers.join(", ")}`);
   if (macro) reasons.push("Macros are present and cannot be preserved by this Repair.");
   if (external) reasons.push("External connections are present and cannot be proven safe by this Repair.");
-  if (findings.some((finding) => finding.mechanism !== "hidden_worksheet")) {
+  if (findings.some((finding) => !["hidden_worksheet", "hidden_row_or_column", "pivot_cache"].includes(finding.mechanism))) {
     reasons.push("The complete plan contains a concealed mechanism that this Repair does not transform.");
+  }
+
+  for (const cache of pivotCaches) {
+    if (cache.supported) actions.push(clearPivotCacheAction(cache));
+    else reasons.push(cache.refusalReason ?? `Pivot cache ${cache.definitionMember} is not supported.`);
   }
 
   for (const sheet of hidden) {
@@ -323,6 +836,66 @@ function buildPlan(
     }
   }
 
+  for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
+    const cells = concealedByWorksheet[sheet.path] ?? [];
+    const unresolvedCount = unresolvedByWorksheet[sheet.path] ?? 0;
+    if (cells.length === 0 && unresolvedCount === 0) continue;
+    const sheetDependencies: string[] = [];
+    const dependentMembers = new Set<string>();
+    if (unresolvedCount > 0) sheetDependencies.push(`${unresolvedCount} concealed value(s) without an exact cell reference`);
+    const sharedCellReferences = sharedStringCells(decoder.decode(files[sheet.path] ?? new Uint8Array()), cells);
+    if (sharedCellReferences.length > 0) sheetDependencies.push("shared-string value in xl/sharedStrings.xml");
+    for (const [member, bytes] of Object.entries(files)) {
+      const xml = decoder.decode(bytes);
+      const relatedToSheet = member === sheet.path || memberIsRelatedToWorksheet(member, sheet.path, relationships);
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "f", sheet, cells, member, false, sheets)) {
+        dependencies.visible_formulas.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("visible formula in " + member);
+      }
+      if (member === "xl/workbook.xml" && matchingElementsForCells(xml, "definedName", sheet, cells, undefined, false, sheets)) {
+        dependencies.defined_names.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("defined name in xl/workbook.xml");
+      }
+      if (visibleSheetPaths.has(member) && matchingElementsForCells(xml, "dataValidation", sheet, cells, member, false, sheets)) {
+        dependencies.data_validation.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("data validation in " + member);
+      }
+      if (member.startsWith("xl/tables/") && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
+        dependencies.tables.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("table in " + member);
+      }
+      if ((member.startsWith("xl/charts/") || member.startsWith("xl/drawings/")) && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
+        dependencies.charts.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("chart or drawing in " + member);
+      }
+      if (member.startsWith("xl/pivot") && member.endsWith(".xml") &&
+        referencesCells(xml, sheet, cells, relatedToSheet ? sheet.path : undefined, false, sheets)) {
+        dependencies.pivots.push(member);
+        dependentMembers.add(member);
+        sheetDependencies.push("pivot in " + member);
+      }
+    }
+    for (const dependentMember of dependentMembers) {
+      const path = relationshipPathToWorksheet(dependentMember, sheet.path, relationships) ?? [];
+      for (const relationMember of path) {
+        dependencies.package_relationships.push(relationMember);
+        sheetDependencies.push("package relationship in " + relationMember);
+      }
+    }
+    if (sheetDependencies.length > 0) {
+      reasons.push("Concealed values in worksheet " + sheet.name + " have dependencies: " + unique(sheetDependencies).join(", ") + ".");
+    } else {
+      actions.push(clearActionFor(sheet, cells));
+    }
+  }
+
   const plan: RepairPlan = {
     version: "1",
     operation: "repair_plan",
@@ -356,28 +929,35 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   try {
     files = unzipSync(bytes);
   } catch {
-    return { files: {}, sheets: [], findings: [], profileAccepted: false, unknownMembers: [] };
+    return { files: {}, sheets: [], findings: [], profileAccepted: false, unknownMembers: [], pivotCaches: [] };
   }
   const unknownMembers = Object.keys(files).filter((name) => !allowedProfilePart(name));
+  const malformedXml = Object.entries(files).some(([name, bytes]) =>
+    (name.endsWith(".xml") || name.endsWith(".rels")) && !xmlWellFormed(decoder.decode(bytes)));
   const workbook = files["xl/workbook.xml"];
   const contentTypes = files["[Content_Types].xml"];
+  const hasWorksheet = Object.keys(files).some((name) => name.startsWith("xl/worksheets/") && name.endsWith(".xml"));
   const profileAccepted = Boolean(
-    workbook && contentTypes && files["xl/worksheets/sheet1.xml"] &&
+    workbook && contentTypes && hasWorksheet &&
     decoder.decode(contentTypes).includes("spreadsheetml.sheet.main+xml") &&
-    unknownMembers.length === 0,
+    unknownMembers.length === 0 &&
+    !malformedXml,
   );
-  if (!profileAccepted) return { files, sheets: workbook ? workbookSheets(files) : [], findings: [], profileAccepted: false, unknownMembers };
+  if (!profileAccepted) return { files, sheets: workbook ? workbookSheets(files) : [], findings: [], profileAccepted: false, unknownMembers, pivotCaches: [] };
   const sheets = workbookSheets(files);
   const findings: Finding[] = [];
   const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
   if (hiddenSheets.length > 0) findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
-  const hiddenRows = Object.entries(files).reduce((count, [name, member]) => {
-    if (!name.startsWith("xl/worksheets/") || !name.endsWith(".xml")) return count;
-    return count + (decoder.decode(member).match(new RegExp(`<${localElement("row|col")}\\b[^>]*\\bhidden=["'](?:1|true)["'][^>]*>`, "gi")) ?? []).length;
-  }, 0);
-  if (hiddenRows > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: hiddenRows });
-  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers);
-  return { files, sheets, findings, profileAccepted, unknownMembers, ...(plan ? { plan } : {}) };
+  const concealed = concealedCellsByWorksheet(files, sheets);
+  const unresolved = unresolvedConcealedValuesByWorksheet(files, sheets);
+  const concealedValueCount = Object.values(concealed).reduce((count, cells) => count + cells.length, 0) + Object.values(unresolved).reduce((count, value) => count + value, 0);
+  if (concealedValueCount > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: concealedValueCount });
+  const pivotCaches = inspectPivotCaches(files, sheets);
+  for (const cache of pivotCaches) {
+    if (cache.cacheOnlyCount > 0) findings.push({ mechanism: "pivot_cache", location: cache.recordsMember || cache.definitionMember, count: cache.cacheOnlyCount });
+  }
+  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers, unresolved, pivotCaches);
+  return { files, sheets, findings, profileAccepted, unknownMembers, pivotCaches, ...(plan ? { plan } : {}) };
 }
 
 export function scanWorkbook(bytes: Uint8Array, artifactSha256: string): EngineScanResult {
@@ -436,6 +1016,58 @@ function removeContentType(xml: string, target: string): string {
   return result;
 }
 
+function clearCellValues(xml: string, cells: readonly string[]): string {
+  const targets = new Set(cells.map((reference) => cellInfo(reference)?.reference).filter((reference): reference is string => reference !== undefined));
+  const changed = new Set<string>();
+  const cellPattern = new RegExp(
+    "(<" + localElement("c") + "\\b[^>]*>)([\\s\\S]*?)(</" + localElement("c") + ">)|(<" + localElement("c") + "\\b[^>]*/>)",
+    "gi",
+  );
+  const valuePattern = new RegExp(
+    "<" + localElement("f|v|is") + "\\b[\\s\\S]*?(?:</" + localElement("f|v|is") + ">|\\/>)",
+    "gi",
+  );
+  const result = xml.replace(cellPattern, (full, opening: string | undefined, content: string | undefined, closing: string | undefined) => {
+    const attributes = opening?.match(new RegExp("<" + localElement("c") + "\\b([^>]*)", "i"))?.[1] ?? "";
+    const reference = cellInfo(xmlAttribute(attributes, "r") ?? "")?.reference;
+    if (!reference || !targets.has(reference)) return full;
+    if (!opening || content === undefined || !closing) throw new Error("concealed cell is not a complete XML element");
+    const cleared = content.replace(valuePattern, "");
+    if (cleared === content) throw new Error("concealed cell has no clearable value");
+    changed.add(reference);
+    return opening + cleared + closing;
+  });
+  if (changed.size !== targets.size || [...targets].some((reference) => !changed.has(reference))) {
+    throw new Error("repair target concealed cell is missing");
+  }
+  return result;
+}
+
+function clearPivotCacheDefinition(xml: string): string {
+  const sharedAttributes = ["count", "minValue", "maxValue", "minDate", "maxDate"];
+  const withoutValues = xml.replace(
+    new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "gi"),
+    (full) => {
+      const opening = full.match(new RegExp(`<${localElement("sharedItems")}\\b[^>]*`, "i"))?.[0] ?? "";
+      const cleanedOpening = removeXmlAttributes(opening, sharedAttributes);
+      return cleanedOpening.replace(/\/\s*$/, "") + "/>";
+    },
+  );
+  return withoutValues.replace(new RegExp(`<${localElement("pivotCacheDefinition")}\\b([^>]*)>`, "i"), (full) => setXmlAttribute(full, "recordCount", "0"));
+}
+
+function clearPivotCacheRecords(xml: string): string {
+  const withoutRows = xml.replace(new RegExp(`<${localElement("r")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("r")}>)`, "gi"), "");
+  return withoutRows.replace(new RegExp(`<${localElement("pivotCacheRecords")}\\b([^>]*)>`, "i"), (full) => setXmlAttribute(full, "count", "0"));
+}
+
+export function revealPivotCache(bytes: Uint8Array, finding: Finding): RevealRow[] {
+  const files = unzipSync(bytes);
+  const caches = inspectPivotCaches(files, workbookSheets(files));
+  const cache = caches.find((candidate) => candidate.recordsMember === finding.location);
+  return cache?.rows.slice(0, 5) ?? [];
+}
+
 export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha256: string): { bytes: Uint8Array; changedMembers: string[] } {
   if (plan.status !== "eligible" || plan.artifact_sha256 !== artifactSha256) throw new Error("repair plan is not eligible for this artifact");
   const inspection = inspectPackage(bytes, artifactSha256, plan.engine_version);
@@ -444,19 +1076,34 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
   let workbook = decoder.decode(inspection.files["xl/workbook.xml"]!);
   let relationships = decoder.decode(inspection.files["xl/_rels/workbook.xml.rels"]!);
   let contentTypes = decoder.decode(inspection.files["[Content_Types].xml"]!);
+  let workbookChanged = false;
   for (const action of plan.actions) {
-    const removed = removeSheet(workbook, action.worksheet);
-    workbook = removed.xml;
-    relationships = removeRelationship(relationships, removed.relationshipId);
-    if (plan.changed_members.includes("[Content_Types].xml")) {
-      contentTypes = removeContentType(contentTypes, action.target_member);
+    if (action.kind === "delete_hidden_worksheet") {
+      workbookChanged = true;
+      const removed = removeSheet(workbook, action.worksheet);
+      workbook = removed.xml;
+      relationships = removeRelationship(relationships, removed.relationshipId);
+      if (plan.changed_members.includes("[Content_Types].xml")) {
+        contentTypes = removeContentType(contentTypes, action.target_member);
+      }
+      changes.set(action.target_member, null);
+      const relationshipPart = worksheetRelationshipMember(action.target_member);
+      if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
+    } else if (action.kind === "clear_hidden_cell_values") {
+      const current = decoder.decode(inspection.files[action.target_member] ?? new Uint8Array());
+      changes.set(action.target_member, new TextEncoder().encode(clearCellValues(current, action.cell_references)));
+    } else {
+      const definition = inspection.files[action.definition_member];
+      const records = inspection.files[action.records_member];
+      if (!definition || !records) throw new Error("pivot cache repair target is missing");
+      changes.set(action.definition_member, new TextEncoder().encode(clearPivotCacheDefinition(decoder.decode(definition))));
+      changes.set(action.records_member, new TextEncoder().encode(clearPivotCacheRecords(decoder.decode(records))));
     }
-    changes.set(action.target_member, null);
-    const relationshipPart = worksheetRelationshipMember(action.target_member);
-    if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
   }
-  changes.set("xl/workbook.xml", new TextEncoder().encode(workbook));
-  changes.set("xl/_rels/workbook.xml.rels", new TextEncoder().encode(relationships));
+  if (workbookChanged) {
+    changes.set("xl/workbook.xml", new TextEncoder().encode(workbook));
+    changes.set("xl/_rels/workbook.xml.rels", new TextEncoder().encode(relationships));
+  }
   if (plan.changed_members.includes("[Content_Types].xml")) {
     changes.set("[Content_Types].xml", new TextEncoder().encode(contentTypes));
   }
@@ -467,7 +1114,13 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
 
 function visibleBaseline(files: Record<string, Uint8Array>): string {
   const sheets = workbookSheets(files).filter((sheet) => sheet.state !== "hidden" && sheet.state !== "veryhidden");
-  return sha256(canonicalJson(sheets.map((sheet) => ({ name: sheet.name, path: sheet.path, xml: Buffer.from(files[sheet.path] ?? new Uint8Array()).toString("base64") }))));
+  return sha256(canonicalJson(sheets.map((sheet) => {
+    const bytes = files[sheet.path] ?? new Uint8Array();
+    const xml = decoder.decode(bytes);
+    const concealed = concealedCells(xml).map((cell) => cell.reference);
+    const baselineXml = concealed.length > 0 ? clearCellValues(xml, concealed) : xml;
+    return { name: sheet.name, path: sheet.path, xml: Buffer.from(baselineXml).toString("base64") };
+  })));
 }
 
 function relationshipsValid(files: Record<string, Uint8Array>): boolean {
@@ -486,11 +1139,42 @@ function contentTypesValid(files: Record<string, Uint8Array>): boolean {
   return true;
 }
 
+function reopenSupportedPackage(files: Record<string, Uint8Array>): boolean {
+  if (!files["xl/workbook.xml"] || !Object.keys(files).some((name) => name.startsWith("xl/worksheets/") && name.endsWith(".xml"))) return false;
+  return Object.entries(files).every(([name, bytes]) => (
+    !(name.endsWith(".xml") || name.endsWith(".rels")) || xmlWellFormed(decoder.decode(bytes))
+  ));
+}
+
 function changedMembers(original: Record<string, Uint8Array>, candidate: Record<string, Uint8Array>): string[] {
   return unique([
     ...Object.keys(original).filter((name) => !candidate[name] || sha256(original[name]!) !== sha256(candidate[name]!)),
     ...Object.keys(candidate).filter((name) => !original[name]),
   ]);
+}
+
+function approvedContentsMatch(
+  original: Record<string, Uint8Array>,
+  candidate: Record<string, Uint8Array>,
+  plan?: RepairPlan,
+): boolean {
+  for (const action of plan?.actions ?? []) {
+    if (action.kind === "clear_hidden_cell_values") {
+      const originalXml = original[action.target_member];
+      const candidateXml = candidate[action.target_member];
+      if (!originalXml || !candidateXml) return false;
+      if (decoder.decode(candidateXml) !== clearCellValues(decoder.decode(originalXml), action.cell_references)) return false;
+    } else if (action.kind === "clear_pivot_cache_values") {
+      const originalDefinition = original[action.definition_member];
+      const candidateDefinition = candidate[action.definition_member];
+      const originalRecords = original[action.records_member];
+      const candidateRecords = candidate[action.records_member];
+      if (!originalDefinition || !candidateDefinition || !originalRecords || !candidateRecords) return false;
+      if (decoder.decode(candidateDefinition) !== clearPivotCacheDefinition(decoder.decode(originalDefinition))) return false;
+      if (decoder.decode(candidateRecords) !== clearPivotCacheRecords(decoder.decode(originalRecords))) return false;
+    }
+  }
+  return true;
 }
 
 export function verifyWorkbook(
@@ -506,7 +1190,7 @@ export function verifyWorkbook(
     const remainingFindings = candidate.findings;
     const relationships = relationshipsValid(candidate.files);
     const contentTypes = contentTypesValid(candidate.files);
-    const reopened = candidate.profileAccepted && candidate.files["xl/workbook.xml"] && candidate.files["xl/worksheets/sheet1.xml"];
+    const reopened = candidate.profileAccepted && reopenSupportedPackage(candidate.files);
     const baselineUnchanged = visibleBaseline(original.files) === visibleBaseline(candidate.files);
     const actualChanges = changedMembers(original.files, candidate.files);
     const allowedChanges = new Set(plan?.changed_members ?? []);
@@ -514,7 +1198,8 @@ export function verifyWorkbook(
     const changedMembersMatch = plan
       ? canonicalJson(actualChanges) === canonicalJson(plan.changed_members)
       : true;
-    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch;
+    const contentsMatch = approvedContentsMatch(original.files, candidate.files, plan);
+    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch && contentsMatch;
     const result: EngineVerifyResult = {
       version: "1",
       operation: "verify",

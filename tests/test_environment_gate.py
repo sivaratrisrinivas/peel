@@ -60,7 +60,12 @@ def test_offline_gate_reports_mandatory_no_go_and_optional_cuts() -> None:
         for gate in report["gates"]
         if not gate["mandatory"] and gate["status"] == "cut"
     }
-    assert {"reveal", "libreoffice", "pivot_fixture"} <= optional_cuts
+    assert {"reveal", "libreoffice"} <= optional_cuts
+
+    pivot_gate = next(gate for gate in report["gates"] if gate["name"] == "pivot_fixture")
+    assert pivot_gate["status"] == "pass"
+    assert pivot_gate["evidence"]["trusted_fixture_found"] is True
+    assert pivot_gate["evidence"]["cache_only_value_found"] is True
 
 
 def test_report_never_echoes_secret_values() -> None:

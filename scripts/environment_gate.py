@@ -14,11 +14,13 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -581,39 +583,186 @@ def _probe_libreoffice() -> dict[str, Any]:
     )
 
 
+def _fixture_element_name(element: ElementTree.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1].lower()
+
+
+def _fixture_attribute(element: ElementTree.Element, name: str) -> str | None:
+    for key, value in element.attrib.items():
+        if key.rsplit("}", 1)[-1].lower() == name.lower() or key.rsplit(":", 1)[-1].lower() == name.lower():
+            return value
+    return None
+
+
+def _fixture_relationship_target(member: str, target: str) -> str:
+    if target.startswith("/"):
+        return posixpath.normpath(target).lstrip("/")
+    source = member.replace("/_rels/", "/", 1).removesuffix(".rels")
+    directory = posixpath.dirname(source)
+    return posixpath.normpath(posixpath.join(directory, target)).lstrip("/")
+
+
+def _fixture_relationships(package: zipfile.ZipFile, source: str) -> dict[str, str]:
+    directory, _, filename = source.rpartition("/")
+    relationship_member = f"{directory + '/' if directory else ''}_rels/{filename}.rels"
+    try:
+        root = ElementTree.fromstring(package.read(relationship_member))
+    except (KeyError, ElementTree.ParseError, UnicodeDecodeError):
+        return {}
+    return {
+        relationship_id: _fixture_relationship_target(relationship_member, target)
+        for relationship in root
+        if (relationship_id := _fixture_attribute(relationship, "Id"))
+        and (target := _fixture_attribute(relationship, "Target"))
+        and (_fixture_attribute(relationship, "TargetMode") or "").lower() != "external"
+    }
+
+
+def _fixture_visible_values(package: zipfile.ZipFile, workbook_root: ElementTree.Element) -> tuple[set[str], dict[str, str]]:
+    shared_strings: list[str] = []
+    try:
+        shared_root = ElementTree.fromstring(package.read("xl/sharedStrings.xml"))
+    except (KeyError, ElementTree.ParseError, UnicodeDecodeError):
+        shared_root = None
+    if shared_root is not None:
+        shared_strings = [
+            "".join(text.text or "" for text in item.iter() if _fixture_element_name(text) == "t")
+            for item in shared_root
+            if _fixture_element_name(item) == "si"
+        ]
+
+    workbook_relationships = _fixture_relationships(package, "xl/workbook.xml")
+    values: set[str] = set()
+    sheets: dict[str, str] = {}
+    for sheet in workbook_root.iter():
+        if _fixture_element_name(sheet) != "sheet":
+            continue
+        if (_fixture_attribute(sheet, "state") or "visible").lower() in {"hidden", "veryhidden"}:
+            continue
+        name = _fixture_attribute(sheet, "name") or ""
+        relationship_id = _fixture_attribute(sheet, "id") or ""
+        path = workbook_relationships.get(relationship_id, "")
+        if not name or not path:
+            continue
+        sheets[name] = path
+        try:
+            worksheet_root = ElementTree.fromstring(package.read(path))
+        except (KeyError, ElementTree.ParseError, UnicodeDecodeError):
+            continue
+        for cell in worksheet_root.iter():
+            if _fixture_element_name(cell) != "c":
+                continue
+            cell_type = (_fixture_attribute(cell, "t") or "").lower()
+            value_element = next(
+                (child for child in cell if _fixture_element_name(child) in {"v", "t"}),
+                None,
+            )
+            if value_element is None:
+                continue
+            value = _fixture_attribute(value_element, "v") or "".join(value_element.itertext())
+            if cell_type == "s" and value.isdigit() and int(value) < len(shared_strings):
+                value = shared_strings[int(value)]
+            values.add(value)
+    return values, sheets
+
+
+def _fixture_pivot_rows(
+    package: zipfile.ZipFile,
+    definition_root: ElementTree.Element,
+    records_member: str,
+) -> list[list[str]]:
+    fields: list[list[str]] = []
+    for field in definition_root.iter():
+        if _fixture_element_name(field) != "cachefield":
+            continue
+        shared = next((child for child in field if _fixture_element_name(child) == "shareditems"), None)
+        fields.append(
+            [
+                _fixture_attribute(value, "v") or "".join(value.itertext())
+                for value in list(shared or [])
+                if _fixture_element_name(value) in {"s", "n", "d", "b", "e", "m"}
+            ]
+        )
+    try:
+        records_root = ElementTree.fromstring(package.read(records_member))
+    except (KeyError, ElementTree.ParseError, UnicodeDecodeError):
+        return []
+    rows: list[list[str]] = []
+    for record in records_root:
+        if _fixture_element_name(record) != "r":
+            continue
+        row: list[str] = []
+        for value in record:
+            tag = _fixture_element_name(value)
+            raw = _fixture_attribute(value, "v") or "".join(value.itertext())
+            if tag == "x":
+                if not raw.isdigit() or len(row) >= len(fields) or int(raw) >= len(fields[len(row)]):
+                    return []
+                row.append(fields[len(row)][int(raw)])
+            elif tag in {"s", "n", "d", "b", "e", "m"}:
+                row.append(raw)
+        rows.append(row)
+    return rows
+
+
 def _probe_pivot_fixture(root: Path) -> dict[str, Any]:
-    fixture_root = root / "fixtures"
-    candidates = sorted(fixture_root.rglob("*.xlsx")) if fixture_root.exists() else []
+    fixture_roots = [root / "fixtures", root / "tests" / "fixtures"]
+    candidates = sorted({candidate for fixture_root in fixture_roots if fixture_root.exists() for candidate in fixture_root.rglob("*.xlsx")})
     evidence: dict[str, Any] = {
-        "fixture_directory_present": fixture_root.exists(),
+        "fixture_directory_present": any(fixture_root.exists() for fixture_root in fixture_roots),
         "candidate_count": len(candidates),
         "trusted_fixture_found": False,
         "required_parts_found": False,
+        "cache_only_value_found": False,
     }
     for candidate in candidates:
         try:
             with zipfile.ZipFile(candidate) as package:
-                members = {member.lower() for member in package.namelist()}
-                has_definition = any("pivotcachedefinition" in member for member in members)
-                has_records = any("pivotcacherecords" in member for member in members)
-                shared_items = any(
-                    b"<sharedItems" in package.read(member)
-                    for member in package.namelist()
-                    if member.lower().endswith(".xml")
-                )
-        except (OSError, ValueError, zipfile.BadZipFile):
+                members = set(package.namelist())
+                definitions = sorted(member for member in members if re.fullmatch(r"xl/pivotCache/pivotCacheDefinition[^/]*\.xml", member, re.IGNORECASE))
+                records = sorted(member for member in members if re.fullmatch(r"xl/pivotCache/pivotCacheRecords[^/]*\.xml", member, re.IGNORECASE))
+                has_definition = bool(definitions)
+                has_records = bool(records)
+                shared_items = False
+                cache_only = False
+                workbook_root = ElementTree.fromstring(package.read("xl/workbook.xml"))
+                visible_values, visible_sheets = _fixture_visible_values(package, workbook_root)
+                for definition_name in definitions:
+                    definition_root = ElementTree.fromstring(package.read(definition_name))
+                    fields = [element for element in definition_root.iter() if _fixture_element_name(element) == "shareditems"]
+                    populated = [element for element in fields if any(_fixture_element_name(child) in {"s", "n", "d", "b", "e", "m"} for child in element)]
+                    shared_items = shared_items or bool(populated)
+                    source = next((element for element in definition_root.iter() if element.tag.rsplit("}", 1)[-1].lower() == "worksheetsource"), None)
+                    source_sheet = _fixture_attribute(source, "sheet") if source is not None else ""
+                    definition_relationships = _fixture_relationships(package, definition_name)
+                    records_member = next(
+                        (
+                            target
+                            for target in definition_relationships.values()
+                            if target in records
+                        ),
+                        "",
+                    )
+                    rows = _fixture_pivot_rows(package, definition_root, records_member) if records_member else []
+                    cache_only = cache_only or bool(rows) and any(
+                        source_sheet not in visible_sheets
+                        or any(value not in visible_values for value in row)
+                        for row in rows
+                    )
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, ElementTree.ParseError):
             continue
-        if has_definition and has_records and shared_items:
+        evidence["required_parts_found"] = evidence["required_parts_found"] or (has_definition and has_records and shared_items)
+        evidence["cache_only_value_found"] = evidence["cache_only_value_found"] or (has_definition and has_records and shared_items and cache_only)
+        if evidence["required_parts_found"] and evidence["cache_only_value_found"]:
             evidence["trusted_fixture_found"] = True
-            evidence["required_parts_found"] = True
             break
 
-    if evidence["required_parts_found"]:
+    if evidence["trusted_fixture_found"]:
         return _gate(
             "pivot_fixture",
             False,
             "pass",
-            "A pivot fixture contains the required cache definition, records, and shared items.",
+            "A public pivot fixture proves populated cache parts and a cache-only value absent from visible worksheets.",
             evidence,
         )
     return _gate(
