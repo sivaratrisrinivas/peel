@@ -20,7 +20,7 @@ Cerebras Scope Assessment is a one-way advisory veto. `mismatch`, `insufficient_
 
 The TrueForge/Cerebras gate uses an explicitly configured Cerebras custom model and records the model resolved by the returned TrueForge session and live model/provider catalogs. `gpt-oss-120b` remains the preferred model; the current TrueForge 0.1.4 runtime probe also supports the configured `gemma-4-31b` fallback because the preferred model's deferred-tool continuation returned HTTP 400. Selecting the fallback is valid only after the same serial-tool, native-denial, runtime-identity, and zero-side-effect proof passes; it is not a silent provider substitution.
 
-Google Drive is an optional fixture-intake and review path for the hackathon. It may provide a sanitized raw `.xlsx` fixture or a metadata-only report, but it does not own Run state, approvals, artifact identity, formula evaluation, or fidelity decisions. Peel must fetch the original Office file, verify its hash locally, and avoid converting the authoritative fixture into native Google Sheets. A connected Drive search during this environment review found no suitable raw `.xlsx` pivot fixture, so pivot-fixture coverage remains an explicit cut.
+Google Drive is an optional fixture-intake and review path for the hackathon. It may provide a sanitized raw `.xlsx` fixture or a metadata-only report, but it does not own Run state, approvals, artifact identity, formula evaluation, or fidelity decisions. Peel must fetch the original Office file, verify its hash locally, and avoid converting the authoritative fixture into native Google Sheets. The public OOXML reference corpus now supplies the pivot authoring source package; issue #9 derives a cache-only variant by removing only the visible source worksheet and its package references. The source and derived hashes are recorded in `docs/evidence/pivot-cache-fixture-2026-08-29.md`.
 
 The supported claim is limited to mechanisms that Peel supports and successfully executes. Unknown or unsupported content-bearing workbook features, unproven fidelity, or failed Verification produce Refusal rather than a globally “clean” result. Untouched OOXML ZIP members remain byte-identical; changed members receive targeted semantic checks.
 
@@ -36,7 +36,7 @@ The gate is a prerequisite for dependent implementation. A mandatory gate passes
 | Owned mail | Owned Gmail draft retrieval and owned-recipient SMTP delivery | Pass — the live IMAP/SMTP probe validated the strict draft envelope and completed one owned-recipient delivery |
 | Sensitive Reveal | Private transcript/retention path | Cut — metadata-only policy applies until proven |
 | LibreOffice | Availability for supported-profile reopen checks | Cut — the current host has no available LibreOffice binary; the dependent route remains out of scope |
-| Pivot fixture | Inspected trusted package with the required pivot-cache structures | Cut — no trusted fixture is present |
+| Pivot fixture | Inspected trusted package with the required pivot-cache structures | Pass — public OOXML source and derived cache-only fixture contain the definition, records, populated shared items, and a cache-only value |
 
 The final consolidated decision is `GO`: every mandatory gate passed in the live environment record dated 2026-08-28. Any future mandatory failure keeps the decision `NO-GO` and blocks issue #3 and all dependent implementation. Optional cuts must be named in the gate report and must not be presented as supported coverage.
 

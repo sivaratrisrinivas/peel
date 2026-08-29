@@ -8,6 +8,7 @@ import {
   type EngineScanResult,
   type EngineVerifyResult,
   type Finding,
+  type RevealRow,
   type RepairAction,
   type RepairPlan,
 } from "./contracts.js";
@@ -35,12 +36,30 @@ interface PackageInspection {
   findings: Finding[];
   profileAccepted: boolean;
   unknownMembers: string[];
+  pivotCaches: PivotCacheInfo[];
   plan?: RepairPlan;
+}
+
+interface PivotCacheInfo {
+  definitionMember: string;
+  recordsMember: string;
+  sourceSheet: string;
+  supported: boolean;
+  refusalReason?: string;
+  rows: RevealRow[];
+  cacheOnlyCount: number;
 }
 
 function xmlAttribute(attributes: string, name: string): string | undefined {
   const escaped = name.replace(":", "\\:");
   return attributes.match(new RegExp(`(?:^|\\s)${escaped}=["']([^"']*)["']`, "i"))?.[1];
+}
+
+function xmlAttributeByLocalName(attributes: string, name: string): string | undefined {
+  for (const match of attributes.matchAll(/\s([A-Za-z_][\w.:-]*)=["']([^"']*)["']/g)) {
+    if (match[1]!.split(":").pop()?.toLowerCase() === name.toLowerCase()) return match[2];
+  }
+  return undefined;
 }
 
 function decodeXml(value: string): string {
@@ -115,7 +134,7 @@ function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
   const relationships = workbookRelationshipMap(files);
   return Array.from(workbook.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => {
     const attributes = match[1] ?? "";
-    const relationshipId = xmlAttribute(attributes, "r:id") ?? xmlAttribute(attributes, "id") ?? "";
+    const relationshipId = xmlAttributeByLocalName(attributes, "id") ?? "";
     return {
       name: decodeXml(xmlAttribute(attributes, "name") ?? ""),
       state: xmlAttribute(attributes, "state")?.toLowerCase() ?? "visible",
@@ -123,6 +142,125 @@ function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
       path: relationships.get(relationshipId) ?? "",
     };
   });
+}
+
+function setXmlAttribute(opening: string, name: string, value: string): string {
+  const pattern = new RegExp(`(\\s${name.replace(":", "\\:")}=["'])([^"']*)(["'])`, "i");
+  if (pattern.test(opening)) return opening.replace(pattern, `$1${value}$3`);
+  return opening.replace(/\s*\/>$/, ` ${name}="${value}"/>`).replace(/\s*>$/, ` ${name}="${value}">`);
+}
+
+function removeXmlAttributes(opening: string, names: readonly string[]): string {
+  let result = opening;
+  for (const name of names) {
+    result = result.replace(new RegExp(`\\s${name.replace(":", "\\:")}=["'][^"']*["']`, "gi"), "");
+  }
+  return result;
+}
+
+function pivotValueElements(xml: string): string[] {
+  const values: string[] = [];
+  const pattern = new RegExp(
+    `<${localElement("s|n|d|b|e|m")}\\b([^>]*?)(?:\\/\\>|>([\\s\\S]*?)<\\/${localElement("s|n|d|b|e|m")}>)`,
+    "gi",
+  );
+  for (const match of xml.matchAll(pattern)) {
+    values.push(decodeXml(xmlAttribute(match[1] ?? "", "v") ?? (match[2] ?? "").replace(/<[^>]+>/g, "")));
+  }
+  return values;
+}
+
+function pivotRecordRows(xml: string, sharedItems: readonly string[][]): RevealRow[] {
+  const rows: RevealRow[] = [];
+  const rowPattern = new RegExp(`<${localElement("r")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("r")}>`, "gi");
+  const valuePattern = new RegExp(`<${localElement("x|s|n|d|b|e|m")}\\b([^>]*?)(?:\\/\\>|>([\\s\\S]*?)<\\/${localElement("x|s|n|d|b|e|m")}>)`, "gi");
+  for (const rowMatch of xml.matchAll(rowPattern)) {
+    const values: string[] = [];
+    for (const valueMatch of (rowMatch[1] ?? "").matchAll(valuePattern)) {
+      const tag = valueMatch[0]!.match(/^<(?:(?:[A-Za-z_][\w.-]*):)?([A-Za-z_][\w.-]*)/i)?.[1]?.toLowerCase();
+      const raw = decodeXml(xmlAttribute(valueMatch[1] ?? "", "v") ?? (valueMatch[2] ?? "").replace(/<[^>]+>/g, ""));
+      if (tag === "x") {
+        const index = Number(raw);
+        const field = sharedItems[values.length];
+        if (!Number.isSafeInteger(index) || !field || index < 0 || index >= field.length) return [];
+        values.push(field[index]!);
+      } else {
+        values.push(raw);
+      }
+    }
+    rows.push({ worksheet: "pivot-cache", row: rows.length + 1, values });
+  }
+  return rows;
+}
+
+function visibleWorksheetValues(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Set<string> {
+  const values = new Set<string>();
+  const sharedStrings = Array.from(
+    decoder.decode(files["xl/sharedStrings.xml"] ?? new Uint8Array()).matchAll(
+      new RegExp(`<${localElement("si")}\\b([\\s\\S]*?)<\\/${localElement("si")}>`, "gi"),
+    ),
+  ).map((match) => decodeXml(Array.from((match[1] ?? "").matchAll(new RegExp(`<${localElement("t")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("t")}>`, "gi"))).map((text) => text[1] ?? "").join("")));
+  const pattern = new RegExp(`<${localElement("c")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("c")}>`, "gi");
+  for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
+    const xml = decoder.decode(files[sheet.path] ?? new Uint8Array());
+    const concealed = new Set(concealedCells(xml).map((cell) => cell.reference));
+    const unresolved = unresolvedConcealedValues(xml);
+    for (const cell of xml.matchAll(pattern)) {
+      const attributes = cell[0]!.match(new RegExp(`<${localElement("c")}\\b([^>]*)`, "i"))?.[1] ?? "";
+      const reference = cellInfo(xmlAttributeByLocalName(attributes, "r") ?? "")?.reference;
+      if ((reference !== undefined && concealed.has(reference)) || (reference === undefined && unresolved > 0)) continue;
+      const content = cell[1] ?? "";
+      const value = content.match(new RegExp(`<${localElement("v|t")}\\b[^>]*>([\\s\\S]*?)<\\/${localElement("v|t")}>`, "i"))?.[1];
+      if (value !== undefined) {
+        const decoded = decodeXml(value);
+        const sharedIndex = xmlAttribute(attributes, "t")?.toLowerCase() === "s" ? Number(decoded) : -1;
+        values.add(sharedIndex >= 0 && sharedStrings[sharedIndex] !== undefined ? sharedStrings[sharedIndex]! : decoded);
+      }
+    }
+  }
+  return values;
+}
+
+function inspectPivotCaches(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): PivotCacheInfo[] {
+  const relationships = relationshipEntries(files);
+  const visibleValues = visibleWorksheetValues(files, sheets);
+  const caches: PivotCacheInfo[] = [];
+  for (const definitionMember of Object.keys(files).filter((name) => /^xl\/pivotCache\/pivotCacheDefinition[^/]*\.xml$/i.test(name)).sort()) {
+    const definitionXml = decoder.decode(files[definitionMember]!);
+    const cacheSource = definitionXml.match(new RegExp(`<${localElement("cacheSource")}\\b([^>]*)`, "i"));
+    const sharedItems = Array.from(definitionXml.matchAll(new RegExp(`<${localElement("cacheField")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("cacheField")}>)`, "gi"))).map((field) => {
+      const shared = field[0]!.match(new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "i"));
+      return pivotValueElements(shared?.[0] ?? "");
+    });
+    const recordsRelation = relationships.find((relation) => relation.source === definitionMember && relation.type.toLowerCase().includes("pivotcacherecords"));
+    const recordsMember = recordsRelation?.target ?? "";
+    const recordXml = recordsMember ? decoder.decode(files[recordsMember] ?? new Uint8Array()) : "";
+    const rows = pivotRecordRows(recordXml, sharedItems);
+    const hasData = rows.length > 0 || sharedItems.some((field) => field.length > 0);
+    if (!hasData) continue;
+    const sourceType = xmlAttribute(cacheSource?.[1] ?? "", "type")?.toLowerCase();
+    const sourceSheet = definitionXml.match(new RegExp(`<${localElement("worksheetSource")}\\b([^>]*)`, "i"))?.[1];
+    const sourceName = decodeXml(xmlAttribute(sourceSheet ?? "", "sheet") ?? "pivot-cache");
+    let refusalReason: string | undefined;
+    if (sourceType !== "worksheet") refusalReason = `Pivot cache ${definitionMember} uses unsupported cache source type ${sourceType ?? "unknown"}.`;
+    else if (!sourceSheet) refusalReason = `Pivot cache ${definitionMember} has no worksheet source reference.`;
+    else if (!recordsMember || !files[recordsMember]) refusalReason = `Pivot cache ${definitionMember} has no supported pivotCacheRecords relationship.`;
+    else if (!new RegExp(`^\\s*<${localElement("pivotCacheRecords")}\\b`, "i").test(recordXml)) refusalReason = `Pivot cache ${definitionMember} does not point to a pivotCacheRecords part.`;
+    else if (sharedItems.length === 0 || rows.length === 0) refusalReason = `Pivot cache ${definitionMember} has incomplete cache fields or records.`;
+    const source = sheets.find((sheet) => normalizedSheetName(sheet.name) === normalizedSheetName(sourceName));
+    const cacheOnlyCount = refusalReason ? Math.max(rows.length, 1) : rows.filter((row) => !source || source.state === "hidden" || row.values.some((value) => !visibleValues.has(value))).length;
+    if (cacheOnlyCount === 0 && !refusalReason) continue;
+    caches.push({
+      definitionMember,
+      recordsMember,
+      sourceSheet: sourceName,
+      supported: !refusalReason,
+      ...(refusalReason ? { refusalReason } : {}),
+      rows: rows.map((row) => ({ ...row, worksheet: sourceName })),
+      cacheOnlyCount,
+    });
+  }
+  return caches;
 }
 
 function allowedProfilePart(name: string): boolean {
@@ -141,7 +279,9 @@ function allowedProfilePart(name: string): boolean {
     name.startsWith("xl/drawings/") && (name.endsWith(".xml") || name.endsWith(".rels")) ||
     name.startsWith("xl/charts/") && name.endsWith(".xml") ||
     name.startsWith("xl/pivotTables/") && name.endsWith(".xml") ||
+    name.startsWith("xl/pivotTables/_rels/") && name.endsWith(".rels") ||
     name.startsWith("xl/pivotCache/") && name.endsWith(".xml") ||
+    name.startsWith("xl/pivotCache/_rels/") && name.endsWith(".rels") ||
     name.startsWith("xl/externalLinks/") && (name.endsWith(".xml") || name.endsWith(".rels")) ||
     name === "xl/connections.xml" ||
     name === "xl/vbaProject.bin"
@@ -567,6 +707,22 @@ function clearActionFor(sheet: SheetInfo, cells: readonly string[]): RepairActio
   };
 }
 
+function clearPivotCacheAction(cache: PivotCacheInfo): RepairAction {
+  return {
+    kind: "clear_pivot_cache_values",
+    worksheet: cache.sourceSheet,
+    target_member: cache.recordsMember,
+    definition_member: cache.definitionMember,
+    records_member: cache.recordsMember,
+    changed_members: [cache.definitionMember, cache.recordsMember].sort(),
+    capability_losses: [
+      `Cached pivot values from ${cache.sourceSheet} will be cleared from ${cache.definitionMember} and ${cache.recordsMember}.`,
+      "Pivot filtering, drill-through, refresh, and interactive behavior that depends on cached source values may be lost.",
+      "The original Artifact Reference remains unchanged and retains the recoverable cache values.",
+    ],
+  };
+}
+
 function hasContentTypeOverride(files: Record<string, Uint8Array>, target: string): boolean {
   const xml = decoder.decode(files["[Content_Types].xml"] ?? new Uint8Array());
   for (const match of xml.matchAll(new RegExp(`<${localElement("Override")}\\b([^>]*)\\/?>(?:<\\/${localElement("Override")}>)?`, "gi"))) {
@@ -584,10 +740,11 @@ function buildPlan(
   engineVersion: string,
   unknownMembers: readonly string[],
   unresolvedByWorksheet: Record<string, number>,
+  pivotCaches: readonly PivotCacheInfo[],
 ): RepairPlan | undefined {
   const hidden = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
   const concealedByWorksheet = concealedCellsByWorksheet(files, sheets);
-  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0 && Object.keys(unresolvedByWorksheet).length === 0) return undefined;
+  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0 && Object.keys(unresolvedByWorksheet).length === 0 && pivotCaches.length === 0) return undefined;
   const relationships = relationshipEntries(files);
   const dependencies = emptyDependencies();
   const reasons: string[] = [];
@@ -609,8 +766,13 @@ function buildPlan(
   if (unknownMembers.length > 0) reasons.push(`Unsupported content-bearing package members: ${unknownMembers.join(", ")}`);
   if (macro) reasons.push("Macros are present and cannot be preserved by this Repair.");
   if (external) reasons.push("External connections are present and cannot be proven safe by this Repair.");
-  if (findings.some((finding) => !["hidden_worksheet", "hidden_row_or_column"].includes(finding.mechanism))) {
+  if (findings.some((finding) => !["hidden_worksheet", "hidden_row_or_column", "pivot_cache"].includes(finding.mechanism))) {
     reasons.push("The complete plan contains a concealed mechanism that this Repair does not transform.");
+  }
+
+  for (const cache of pivotCaches) {
+    if (cache.supported) actions.push(clearPivotCacheAction(cache));
+    else reasons.push(cache.refusalReason ?? `Pivot cache ${cache.definitionMember} is not supported.`);
   }
 
   for (const sheet of hidden) {
@@ -767,20 +929,21 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   try {
     files = unzipSync(bytes);
   } catch {
-    return { files: {}, sheets: [], findings: [], profileAccepted: false, unknownMembers: [] };
+    return { files: {}, sheets: [], findings: [], profileAccepted: false, unknownMembers: [], pivotCaches: [] };
   }
   const unknownMembers = Object.keys(files).filter((name) => !allowedProfilePart(name));
   const malformedXml = Object.entries(files).some(([name, bytes]) =>
     (name.endsWith(".xml") || name.endsWith(".rels")) && !xmlWellFormed(decoder.decode(bytes)));
   const workbook = files["xl/workbook.xml"];
   const contentTypes = files["[Content_Types].xml"];
+  const hasWorksheet = Object.keys(files).some((name) => name.startsWith("xl/worksheets/") && name.endsWith(".xml"));
   const profileAccepted = Boolean(
-    workbook && contentTypes && files["xl/worksheets/sheet1.xml"] &&
+    workbook && contentTypes && hasWorksheet &&
     decoder.decode(contentTypes).includes("spreadsheetml.sheet.main+xml") &&
     unknownMembers.length === 0 &&
     !malformedXml,
   );
-  if (!profileAccepted) return { files, sheets: workbook ? workbookSheets(files) : [], findings: [], profileAccepted: false, unknownMembers };
+  if (!profileAccepted) return { files, sheets: workbook ? workbookSheets(files) : [], findings: [], profileAccepted: false, unknownMembers, pivotCaches: [] };
   const sheets = workbookSheets(files);
   const findings: Finding[] = [];
   const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
@@ -789,8 +952,12 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   const unresolved = unresolvedConcealedValuesByWorksheet(files, sheets);
   const concealedValueCount = Object.values(concealed).reduce((count, cells) => count + cells.length, 0) + Object.values(unresolved).reduce((count, value) => count + value, 0);
   if (concealedValueCount > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: concealedValueCount });
-  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers, unresolved);
-  return { files, sheets, findings, profileAccepted, unknownMembers, ...(plan ? { plan } : {}) };
+  const pivotCaches = inspectPivotCaches(files, sheets);
+  for (const cache of pivotCaches) {
+    if (cache.cacheOnlyCount > 0) findings.push({ mechanism: "pivot_cache", location: cache.recordsMember || cache.definitionMember, count: cache.cacheOnlyCount });
+  }
+  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers, unresolved, pivotCaches);
+  return { files, sheets, findings, profileAccepted, unknownMembers, pivotCaches, ...(plan ? { plan } : {}) };
 }
 
 export function scanWorkbook(bytes: Uint8Array, artifactSha256: string): EngineScanResult {
@@ -876,6 +1043,31 @@ function clearCellValues(xml: string, cells: readonly string[]): string {
   return result;
 }
 
+function clearPivotCacheDefinition(xml: string): string {
+  const sharedAttributes = ["count", "minValue", "maxValue", "minDate", "maxDate"];
+  const withoutValues = xml.replace(
+    new RegExp(`<${localElement("sharedItems")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("sharedItems")}>)`, "gi"),
+    (full) => {
+      const opening = full.match(new RegExp(`<${localElement("sharedItems")}\\b[^>]*`, "i"))?.[0] ?? "";
+      const cleanedOpening = removeXmlAttributes(opening, sharedAttributes);
+      return cleanedOpening.replace(/\/\s*$/, "") + "/>";
+    },
+  );
+  return withoutValues.replace(new RegExp(`<${localElement("pivotCacheDefinition")}\\b([^>]*)>`, "i"), (full) => setXmlAttribute(full, "recordCount", "0"));
+}
+
+function clearPivotCacheRecords(xml: string): string {
+  const withoutRows = xml.replace(new RegExp(`<${localElement("r")}\\b(?:[^>]*?\\/\\>|[^>]*>[\\s\\S]*?<\\/${localElement("r")}>)`, "gi"), "");
+  return withoutRows.replace(new RegExp(`<${localElement("pivotCacheRecords")}\\b([^>]*)>`, "i"), (full) => setXmlAttribute(full, "count", "0"));
+}
+
+export function revealPivotCache(bytes: Uint8Array, finding: Finding): RevealRow[] {
+  const files = unzipSync(bytes);
+  const caches = inspectPivotCaches(files, workbookSheets(files));
+  const cache = caches.find((candidate) => candidate.recordsMember === finding.location);
+  return cache?.rows.slice(0, 5) ?? [];
+}
+
 export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha256: string): { bytes: Uint8Array; changedMembers: string[] } {
   if (plan.status !== "eligible" || plan.artifact_sha256 !== artifactSha256) throw new Error("repair plan is not eligible for this artifact");
   const inspection = inspectPackage(bytes, artifactSha256, plan.engine_version);
@@ -897,9 +1089,15 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
       changes.set(action.target_member, null);
       const relationshipPart = worksheetRelationshipMember(action.target_member);
       if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
-    } else {
+    } else if (action.kind === "clear_hidden_cell_values") {
       const current = decoder.decode(inspection.files[action.target_member] ?? new Uint8Array());
       changes.set(action.target_member, new TextEncoder().encode(clearCellValues(current, action.cell_references)));
+    } else {
+      const definition = inspection.files[action.definition_member];
+      const records = inspection.files[action.records_member];
+      if (!definition || !records) throw new Error("pivot cache repair target is missing");
+      changes.set(action.definition_member, new TextEncoder().encode(clearPivotCacheDefinition(decoder.decode(definition))));
+      changes.set(action.records_member, new TextEncoder().encode(clearPivotCacheRecords(decoder.decode(records))));
     }
   }
   if (workbookChanged) {
@@ -942,7 +1140,7 @@ function contentTypesValid(files: Record<string, Uint8Array>): boolean {
 }
 
 function reopenSupportedPackage(files: Record<string, Uint8Array>): boolean {
-  if (!files["xl/workbook.xml"] || !files["xl/worksheets/sheet1.xml"]) return false;
+  if (!files["xl/workbook.xml"] || !Object.keys(files).some((name) => name.startsWith("xl/worksheets/") && name.endsWith(".xml"))) return false;
   return Object.entries(files).every(([name, bytes]) => (
     !(name.endsWith(".xml") || name.endsWith(".rels")) || xmlWellFormed(decoder.decode(bytes))
   ));
@@ -955,17 +1153,26 @@ function changedMembers(original: Record<string, Uint8Array>, candidate: Record<
   ]);
 }
 
-function approvedWorksheetChangesMatch(
+function approvedContentsMatch(
   original: Record<string, Uint8Array>,
   candidate: Record<string, Uint8Array>,
   plan?: RepairPlan,
 ): boolean {
   for (const action of plan?.actions ?? []) {
-    if (action.kind !== "clear_hidden_cell_values") continue;
-    const originalXml = original[action.target_member];
-    const candidateXml = candidate[action.target_member];
-    if (!originalXml || !candidateXml) return false;
-    if (decoder.decode(candidateXml) !== clearCellValues(decoder.decode(originalXml), action.cell_references)) return false;
+    if (action.kind === "clear_hidden_cell_values") {
+      const originalXml = original[action.target_member];
+      const candidateXml = candidate[action.target_member];
+      if (!originalXml || !candidateXml) return false;
+      if (decoder.decode(candidateXml) !== clearCellValues(decoder.decode(originalXml), action.cell_references)) return false;
+    } else if (action.kind === "clear_pivot_cache_values") {
+      const originalDefinition = original[action.definition_member];
+      const candidateDefinition = candidate[action.definition_member];
+      const originalRecords = original[action.records_member];
+      const candidateRecords = candidate[action.records_member];
+      if (!originalDefinition || !candidateDefinition || !originalRecords || !candidateRecords) return false;
+      if (decoder.decode(candidateDefinition) !== clearPivotCacheDefinition(decoder.decode(originalDefinition))) return false;
+      if (decoder.decode(candidateRecords) !== clearPivotCacheRecords(decoder.decode(originalRecords))) return false;
+    }
   }
   return true;
 }
@@ -991,8 +1198,8 @@ export function verifyWorkbook(
     const changedMembersMatch = plan
       ? canonicalJson(actualChanges) === canonicalJson(plan.changed_members)
       : true;
-    const approvedContentsMatch = approvedWorksheetChangesMatch(original.files, candidate.files, plan);
-    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch && approvedContentsMatch;
+    const contentsMatch = approvedContentsMatch(original.files, candidate.files, plan);
+    const verified = candidate.profileAccepted && remainingFindings.length === 0 && relationships && contentTypes && Boolean(reopened) && baselineUnchanged && unexplained.length === 0 && changedMembersMatch && contentsMatch;
     const result: EngineVerifyResult = {
       version: "1",
       operation: "verify",

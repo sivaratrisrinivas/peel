@@ -227,10 +227,18 @@ function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
 
 function parseRepairAction(value: unknown, index: number): RepairAction {
   const input = record(value, `repair_plan.actions[${index}]`);
-  const kind = enumValue(input.kind, ["delete_hidden_worksheet", "clear_hidden_cell_values"] as const, `repair_plan.actions[${index}].kind`);
+  const kind = enumValue(input.kind, ["delete_hidden_worksheet", "clear_hidden_cell_values", "clear_pivot_cache_values"] as const, `repair_plan.actions[${index}].kind`);
   const path = `repair_plan.actions[${index}]`;
   const commonKeys = ["kind", "worksheet", "target_member", "changed_members", "capability_losses"];
-  exactKeys(input, kind === "clear_hidden_cell_values" ? [...commonKeys, "cell_references"] : commonKeys, path);
+  exactKeys(
+    input,
+    kind === "clear_hidden_cell_values"
+      ? [...commonKeys, "cell_references"]
+      : kind === "clear_pivot_cache_values"
+        ? [...commonKeys, "definition_member", "records_member"]
+        : commonKeys,
+    path,
+  );
   const common = {
     worksheet: stringValue(input.worksheet, `${path}.worksheet`),
     target_member: stringValue(input.target_member, `${path}.target_member`),
@@ -238,6 +246,14 @@ function parseRepairAction(value: unknown, index: number): RepairAction {
     capability_losses: parseStringArray(input.capability_losses, `${path}.capability_losses`, 1),
   };
   if (kind === "delete_hidden_worksheet") return { kind, ...common };
+  if (kind === "clear_pivot_cache_values") {
+    return {
+      kind,
+      ...common,
+      definition_member: stringValue(input.definition_member, `${path}.definition_member`),
+      records_member: stringValue(input.records_member, `${path}.records_member`),
+    };
+  }
   return {
     kind,
     ...common,

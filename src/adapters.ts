@@ -26,7 +26,7 @@ import {
   type RepairPlan,
 } from "./contracts.js";
 import { repairPlanHash, sha256 } from "./identity.js";
-import { repairWorkbook, scanWorkbook, verifyWorkbook } from "./repair.js";
+import { repairWorkbook, revealPivotCache, scanWorkbook, verifyWorkbook } from "./repair.js";
 
 export class ArtifactError extends Error {
   readonly code: "expired_artifact" | "undeclared_artifact" | "integrity_failure";
@@ -582,6 +582,8 @@ export class FakeWorkbookEngine implements EngineAdapter {
         rows.push(...rowsFromWorksheet(new TextDecoder().decode(worksheet), sheet.name, true, sharedStrings, 5 - rows.length));
         if (rows.length >= 5) break;
       }
+    } else if (finding.mechanism === "pivot_cache") {
+      rows.push(...revealPivotCache(bytes, finding));
     }
 
     return rows;
