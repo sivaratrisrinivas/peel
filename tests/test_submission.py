@@ -121,6 +121,7 @@ def test_privacy_qualification_inspects_all_required_surfaces_and_redacts_failur
     result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
     assert result["status"] == "blocked"
     assert result["failure_code"] == "forbidden_value_found"
+
     assert "fictional workbook value" not in json.dumps(result)
 
 
@@ -148,6 +149,15 @@ def test_privacy_qualification_rejects_json_escaped_and_base64_values(tmp_path: 
     assert result["status"] == "blocked"
     assert result["failure_code"] == "forbidden_value_found"
 
+    corpus.write_text("fictional credential", encoding="utf-8")
+    paths[2].write_text(
+        json.dumps({"payload": base64.b64encode(b'{"api_key":"not retained"}').decode("ascii")}),
+        encoding="utf-8",
+    )
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "prohibited_field"
+
     attachment_value = b"fictional attachment bytes"
     corpus.write_bytes(attachment_value)
     paths[2].write_text(
@@ -169,6 +179,18 @@ def test_privacy_qualification_rejects_mixed_case_sqlite_prohibited_fields(tmp_p
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
     corpus = tmp_path / "private-values.txt"
+    corpus.write_text("private", encoding="utf-8")
+    result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
+    assert result["status"] == "blocked"
+    assert result["failure_code"] == "prohibited_field"
+
+    with sqlite3.connect(sqlite_path) as database:
+        database.execute("DROP TABLE records")
+        database.execute("CREATE TABLE records (payload TEXT)")
+        database.execute(
+            "INSERT INTO records VALUES (?)",
+            (base64.b64encode(b'{"api_key":"not retained"}').decode("ascii"),),
+        )
     corpus.write_text("private", encoding="utf-8")
     result = submission_qualification.qualify_privacy_manifest(manifest, [corpus])
     assert result["status"] == "blocked"

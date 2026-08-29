@@ -161,7 +161,8 @@ python3 scripts/privacy_qualification.py \
 
 The checker requires all seven surfaces, confirms Daytona cleanup, searches
 their bytes and decoded JSON/SQLite values (including JSON escapes and explicit
-base64 payloads) without returning matches, rejects prohibited persistent field
+base64 payloads, including encoded structured objects) without returning matches,
+rejects prohibited persistent field
 names case-insensitively, and checks tracked repository hygiene. A pass is
 bounded metadata, not a copy of the private corpus.
 

@@ -126,7 +126,8 @@ python3 scripts/privacy_qualification.py \
 The command inspects every listed surface without printing paths, workbook
 values, Reveal values, draft bodies, credentials, or attachment bytes. It
 decodes structured JSON and SQLite values, including JSON escaping and explicit
-base64 payloads, before checking them. It also checks tracked-file hygiene for
+base64 payloads (including encoded structured objects), before checking them.
+It also checks tracked-file hygiene for
 generated workbooks, tracked `.env` files, and common secret signatures. A
 missing surface, unproven Daytona cleanup, prohibited field, forbidden value,
 or repository hygiene violation blocks the qualification. The corpus and raw

@@ -114,6 +114,8 @@ CONFIGURATION_NAMES = (
     "PEEL_PYTHON_BIN",
 )
 MAX_INSPECTED_FILE_BYTES = 128 * 1024 * 1024
+MAX_SERIALIZED_VALUE_BYTES = 4 * 1024 * 1024
+MAX_JSON_INSPECTION_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -317,19 +319,58 @@ def _iter_files(path: Path) -> list[Path]:
     return []
 
 
-def _json_has_prohibited_field(value: object) -> bool:
+class _SerializedInspectionLimit(Exception):
+    """Raised when a structured value exceeds the bounded privacy inspection."""
+
+
+def _parse_json_payload(data: bytes) -> object | None:
+    if len(data) > MAX_SERIALIZED_VALUE_BYTES:
+        if data.lstrip()[:1] in {b"{", b"["}:
+            raise _SerializedInspectionLimit
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    except RecursionError as error:
+        raise _SerializedInspectionLimit from error
+
+
+def _serialized_json_payloads(value: bytes) -> list[object]:
+    payloads: list[object] = []
+    direct = _parse_json_payload(value)
+    if direct is not None:
+        payloads.append(direct)
+    encoded = _decode_base64(value)
+    if encoded is not None:
+        decoded = _parse_json_payload(encoded)
+        if decoded is not None:
+            payloads.append(decoded)
+    return payloads
+
+
+def _json_has_prohibited_field(value: object, *, depth: int = 0) -> bool:
+    if depth > MAX_JSON_INSPECTION_DEPTH:
+        raise _SerializedInspectionLimit
     if isinstance(value, dict):
         if any(str(key).casefold() in FORBIDDEN_JSON_KEYS_CASEFOLD for key in value):
             return True
-        return any(_json_has_prohibited_field(item) for item in value.values())
+        return any(_json_has_prohibited_field(item, depth=depth + 1) for item in value.values())
     if isinstance(value, list):
-        return any(_json_has_prohibited_field(item) for item in value)
+        return any(_json_has_prohibited_field(item, depth=depth + 1) for item in value)
+    if isinstance(value, str):
+        return any(
+            _json_has_prohibited_field(item, depth=depth + 1)
+            for item in _serialized_json_payloads(value.encode("utf-8"))
+        )
     return False
 
 
 def _decode_base64(value: bytes) -> bytes | None:
     if len(value) < 8:
         return None
+    if len(value) > MAX_SERIALIZED_VALUE_BYTES:
+        raise _SerializedInspectionLimit
     try:
         decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
@@ -347,13 +388,19 @@ def _serialized_value_contains_needle(value: bytes, needles: Sequence[bytes]) ->
     return decoded is not None and _contains_needle(decoded, needles)
 
 
-def _json_contains_prohibited_value(value: object, needles: Sequence[bytes]) -> bool:
+def _json_contains_prohibited_value(value: object, needles: Sequence[bytes], *, depth: int = 0) -> bool:
+    if depth > MAX_JSON_INSPECTION_DEPTH:
+        raise _SerializedInspectionLimit
     if isinstance(value, dict):
-        return any(_json_contains_prohibited_value(item, needles) for item in value.values())
+        return any(_json_contains_prohibited_value(item, needles, depth=depth + 1) for item in value.values())
     if isinstance(value, list):
-        return any(_json_contains_prohibited_value(item, needles) for item in value)
+        return any(_json_contains_prohibited_value(item, needles, depth=depth + 1) for item in value)
     if isinstance(value, str):
-        return _serialized_value_contains_needle(value.encode("utf-8"), needles)
+        serialized = value.encode("utf-8")
+        return _serialized_value_contains_needle(serialized, needles) or any(
+            _json_contains_prohibited_value(item, needles, depth=depth + 1)
+            for item in _serialized_json_payloads(serialized)
+        )
     return False
 
 
@@ -367,9 +414,12 @@ def _sqlite_has_prohibited_field(path: Path, needles: Sequence[bytes]) -> bool:
                 return True
             for row in database.execute(f"SELECT * FROM {identifier}"):
                 for value in row:
-                    if isinstance(value, bytes) and _serialized_value_contains_needle(value, needles):
+                    serialized = value if isinstance(value, bytes) else value.encode("utf-8") if isinstance(value, str) else None
+                    if serialized is None:
+                        continue
+                    if _serialized_value_contains_needle(serialized, needles):
                         return True
-                    if isinstance(value, str) and _serialized_value_contains_needle(value.encode("utf-8"), needles):
+                    if any(_json_has_prohibited_field(item) for item in _serialized_json_payloads(serialized)):
                         return True
     return False
 
@@ -473,11 +523,17 @@ def qualify_privacy_manifest(manifest_path: Path, forbidden_files: Sequence[Path
                     prohibited_fields += 1
                 if _json_contains_prohibited_value(decoded_json, needles):
                     prohibited_values += 1
+            except _SerializedInspectionLimit:
+                return _failure("privacy_surface_too_complex", categories_inspected=len(categories))
+            except RecursionError:
+                return _failure("privacy_surface_too_complex", categories_inspected=len(categories))
             except (ValueError, UnicodeDecodeError):
                 pass
         if path.suffix.lower() in {".sqlite", ".db"}:
             try:
                 sqlite_has_prohibited_field = _sqlite_has_prohibited_field(path, needles)
+            except _SerializedInspectionLimit:
+                return _failure("privacy_surface_too_complex", categories_inspected=len(categories))
             except (OSError, sqlite3.Error):
                 return _failure("sqlite_unreadable", categories_inspected=len(categories))
             if sqlite_has_prohibited_field:
