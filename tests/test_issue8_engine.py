@@ -208,6 +208,64 @@ def test_issue8_engine_resolves_middle_sheets_in_3d_formula_ranges(tmp_path: Pat
         assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
 
 
+def test_issue8_engine_resolves_ordinary_unquoted_cross_sheet_references(tmp_path: Path) -> None:
+    source = _package(
+        '<worksheet><sheetData><row r="1"><c r="A1"><f>SUM(Sheet2!A2)</f></c></row></sheetData></worksheet>',
+        output=tmp_path / "ordinary-cross-sheet.xlsx",
+        workbook=(
+            '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+            '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+            '<sheet name="Sheet2" sheetId="2" r:id="rId2"/>'
+            '<sheet name="Sheet3" sheetId="3" r:id="rId3"/>'
+            '</sheets></workbook>'
+        ),
+        extras={
+            "xl/_rels/workbook.xml.rels": (
+                '<Relationships>'
+                '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+                '<Relationship Id="rId3" Target="worksheets/sheet3.xml"/>'
+                '</Relationships>'
+            ),
+            "xl/worksheets/sheet2.xml": '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>secret</v></c></row></sheetData></worksheet>',
+            "xl/worksheets/sheet3.xml": '<worksheet><sheetData/></worksheet>',
+        },
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = daytona_engine._scan_package(source, digest)
+    assert result["repair_plan"]["status"] == "refused"
+    assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
+
+
+def test_issue8_engine_ignores_3d_sheet_prefix_inside_longer_name(tmp_path: Path) -> None:
+    source = _package(
+        '<worksheet><sheetData><row r="2" hidden="1"><c r="A2"><v>secret</v></c></row></sheetData></worksheet>',
+        output=tmp_path / "3d-prefix-collision.xlsx",
+        workbook=(
+            '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+            '<sheet name="Jan" sheetId="1" r:id="rId1"/>'
+            '<sheet name="NotJan" sheetId="2" r:id="rId2"/>'
+            '<sheet name="Mar" sheetId="3" r:id="rId3"/>'
+            '</sheets></workbook>'
+        ),
+        extras={
+            "xl/_rels/workbook.xml.rels": (
+                '<Relationships>'
+                '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+                '<Relationship Id="rId3" Target="worksheets/sheet3.xml"/>'
+                '</Relationships>'
+            ),
+            "xl/worksheets/sheet2.xml": '<worksheet><sheetData><row r="1"><c r="A1"><f>SUM(NotJan:Mar!A2)</f></c></row></sheetData></worksheet>',
+            "xl/worksheets/sheet3.xml": '<worksheet><sheetData/></worksheet>',
+        },
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = daytona_engine._scan_package(source, digest)
+    assert result["repair_plan"]["status"] == "eligible"
+    assert result["repair_plan"]["dependency_analysis"]["visible_formulas"] == []
+
+
 def test_issue8_engine_resolves_3d_whole_ranges_for_first_middle_and_last_sheets(tmp_path: Path) -> None:
     workbook = (
         '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'

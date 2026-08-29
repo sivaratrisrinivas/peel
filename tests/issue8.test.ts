@@ -294,6 +294,24 @@ describe("Issue #8 dependency refusal", () => {
     },
   );
 
+  it("refuses a concealed value referenced by an ordinary unquoted cross-sheet formula", async () => {
+    const base = setup(threeSheetWorkbook("SUM(Sheet2!A2)", 2, 1));
+    const result = await scan(base.daemon, base.artifact);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("repair_refused");
+    expect(result.run?.repair_plan?.dependency_analysis.visible_formulas).toContain("xl/worksheets/sheet1.xml");
+  });
+
+  it("does not treat a 3-D sheet prefix inside a longer sheet name as a dependency", async () => {
+    const base = setup(threeSheetWorkbook("SUM(NotJan:Mar!A2)", 1, 2, ["Jan", "NotJan", "Mar"]));
+    const result = await scan(base.daemon, base.artifact);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.run.repair_plan?.status).toBe("eligible");
+    expect(result.run.repair_plan?.dependency_analysis.visible_formulas).toEqual([]);
+  });
+
   it.each(["SUM(Sheet1:Sheet3!A:A)", "SUM('Sheet1:Sheet3'!A:A)", "SUM(Sheet1:Sheet3!2:2)", "SUM('Sheet1:Sheet3'!2:2)"])(
     "refuses concealed values in every sheet of a 3-D whole range (%s)",
     async (formula) => {

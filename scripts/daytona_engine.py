@@ -354,7 +354,7 @@ def _three_dimensional_range_contains_targets(
                 continue
             prefixes = (
                 rf"'{re.escape(first['name'].replace(chr(39), chr(39) * 2))}:{re.escape(last['name'].replace(chr(39), chr(39) * 2))}'!",
-                rf"{re.escape(first['name'])}:{re.escape(last['name'])}!",
+                rf"(?<![A-Za-z0-9_]){re.escape(first['name'])}:{re.escape(last['name'])}!",
             )
             if range_kind == "cells":
                 suffix = r"\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?"
@@ -388,19 +388,18 @@ def _references_cells(
     if not targets:
         return False
     decoded = _decode_xml(text)
-    def sheet_matches(match: re.Match[str]) -> bool:
-        referenced_sheet = (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2) or "").strip()
-        return referenced_sheet.casefold() == sheet["name"].casefold()
-
+    qualified_sheet_prefix = (
+        rf"(?:'{re.escape(sheet['name'].replace(chr(39), chr(39) * 2))}'|"
+        rf"(?<![A-Za-z0-9_]){re.escape(sheet['name'])})!"
+    )
     reference_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
+        qualified_sheet_prefix
+        + r"\$?([A-Z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Z]{1,3})\$?([1-9][0-9]*))?",
         re.IGNORECASE,
     )
     for match in reference_pattern.finditer(decoded):
-        if not sheet_matches(match):
-            continue
-        start = _cell_info(f"{match.group(3)}{match.group(4)}")
-        end = _cell_info(f"{match.group(5) or match.group(3)}{match.group(6) or match.group(4)}")
+        start = _cell_info(f"{match.group(1)}{match.group(2)}")
+        end = _cell_info(f"{match.group(3) or match.group(1)}{match.group(4) or match.group(2)}")
         if start and end and any(_cell_in_range(target, start, end) for target in targets):
             return True
     if (
@@ -410,18 +409,18 @@ def _references_cells(
     ):
         return True
     qualified_column_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
+        qualified_sheet_prefix + r"\$?([A-Z]{1,3}):\$?([A-Z]{1,3})",
         re.IGNORECASE,
     )
     for match in qualified_column_pattern.finditer(decoded):
-        if sheet_matches(match) and _column_range_contains_targets(targets, match.group(3), match.group(4)):
+        if _column_range_contains_targets(targets, match.group(1), match.group(2)):
             return True
     qualified_row_pattern = re.compile(
-        r"(?:'((?:[^']|'')+)'|([^'!:\[\]\\/?*]+))!\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
+        qualified_sheet_prefix + r"\$?([1-9][0-9]*):\$?([1-9][0-9]*)",
         re.IGNORECASE,
     )
     for match in qualified_row_pattern.finditer(decoded):
-        if sheet_matches(match) and _row_range_contains_targets(targets, match.group(3), match.group(4)):
+        if _row_range_contains_targets(targets, match.group(1), match.group(2)):
             return True
     if current_sheet_path != sheet["path"] and not allow_unqualified_when_unknown_sheet:
         return False
