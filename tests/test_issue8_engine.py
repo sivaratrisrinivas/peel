@@ -177,8 +177,32 @@ def test_issue8_engine_refuses_every_declared_dependency(tmp_path: Path) -> None
 
 
 def test_issue8_engine_refuses_malformed_workbook(tmp_path: Path) -> None:
-    source = _package("<worksheet><sheetData></worksheet>", output=tmp_path / "malformed.xlsx")
+    source = _package("<worksheet><sheetData/></worksheet>trailing", output=tmp_path / "malformed.xlsx")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     result = daytona_engine._scan_package(source, digest)
     assert result["status"] == "refused"
     assert result["refusal_code"] == "unsupported_content"
+
+
+def test_issue8_engine_refuses_unprovable_value_storage(tmp_path: Path) -> None:
+    missing_reference = _package(
+        '<worksheet><sheetData><row r="2" hidden="1"><c t="inlineStr"><is><t>secret</t></is></c></row></sheetData></worksheet>',
+        output=tmp_path / "missing-reference.xlsx",
+    )
+    missing_digest = hashlib.sha256(missing_reference.read_bytes()).hexdigest()
+    missing_result = daytona_engine._scan_package(missing_reference, missing_digest)
+    assert missing_result["findings"] == [
+        {"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": 1}
+    ]
+    assert missing_result["repair_plan"]["status"] == "refused"
+    assert "without an exact cell reference" in " ".join(missing_result["repair_plan"]["refusal_reasons"])
+
+    shared_string = _package(
+        '<worksheet><sheetData><row r="2" hidden="1"><c r="A2" t="s"><v>0</v></c></row></sheetData></worksheet>',
+        output=tmp_path / "shared-string.xlsx",
+        extras={"xl/sharedStrings.xml": "<sst><si><t>secret</t></si></sst>"},
+    )
+    shared_digest = hashlib.sha256(shared_string.read_bytes()).hexdigest()
+    shared_result = daytona_engine._scan_package(shared_string, shared_digest)
+    assert shared_result["repair_plan"]["status"] == "refused"
+    assert "shared-string value" in " ".join(shared_result["repair_plan"]["refusal_reasons"])

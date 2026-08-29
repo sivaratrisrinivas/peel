@@ -154,8 +154,11 @@ function xmlWellFormed(xml: string): boolean {
     .replace(/<!DOCTYPE[\s\S]*?>/gi, "");
   const stack: string[] = [];
   let roots = 0;
+  let cursor = 0;
   const tags = /<\/?([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s[^<>]*?)?\/?>/g;
   for (const match of source.matchAll(tags)) {
+    const text = source.slice(cursor, match.index);
+    if (stack.length === 0 ? text.trim().length > 0 : text.includes("<") || /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);)/i.test(text)) return false;
     const full = match[0] ?? "";
     const name = match[1]!.toLowerCase();
     if (full.startsWith("</")) {
@@ -164,8 +167,10 @@ function xmlWellFormed(xml: string): boolean {
       if (stack.length === 0 && ++roots > 1) return false;
       if (!/\/\s*>$/.test(full)) stack.push(name);
     }
+    cursor = (match.index ?? 0) + full.length;
   }
-  return stack.length === 0 && roots === 1 && /<[A-Za-z_]/.test(source);
+  const trailing = source.slice(cursor);
+  return stack.length === 0 && roots === 1 && trailing.trim().length === 0 && /<[A-Za-z_]/.test(source);
 }
 
 function unique(values: readonly string[]): string[] {
@@ -215,16 +220,41 @@ function cellHasValue(content: string): boolean {
   return new RegExp(`<${localElement("f|v|is")}\\b`, "i").test(content);
 }
 
-function concealedCells(xml: string): CellInfo[] {
+function concealedCellSummary(xml: string): { cells: CellInfo[]; unresolved: number } {
   const dimensions = hiddenDimensionRanges(xml);
   const cells: CellInfo[] = [];
-  for (const match of xml.matchAll(new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${localElement("c")}>)`, "gi"))) {
-    const reference = cellInfo(xmlAttribute(match[1] ?? "", "r") ?? "");
-    if (!reference || !cellHasValue(match[2] ?? "")) continue;
-    const hiddenColumn = dimensions.columns.some(([minimum, maximum]) => reference.column >= minimum && reference.column <= maximum);
-    if (dimensions.rows.has(reference.row) || hiddenColumn) cells.push(reference);
+  let unresolved = 0;
+  const rowPattern = new RegExp(`<${localElement("row")}\\b([^>]*)>([\\s\\S]*?)</${localElement("row")}>`, "gi");
+  const cellPattern = new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)</${localElement("c")}>)`, "gi");
+  for (const rowMatch of xml.matchAll(rowPattern)) {
+    const rowAttributes = rowMatch[1] ?? "";
+    const rowHidden = /(?:^|\s)hidden=["'](?:1|true)["']/i.test(rowAttributes);
+    for (const cellMatch of (rowMatch[2] ?? "").matchAll(cellPattern)) {
+      if (!cellHasValue(cellMatch[2] ?? "")) continue;
+      const reference = cellInfo(xmlAttribute(cellMatch[1] ?? "", "r") ?? "");
+      const hiddenColumn = reference !== undefined && dimensions.columns.some(([minimum, maximum]) => reference.column >= minimum && reference.column <= maximum);
+      if (!rowHidden && !hiddenColumn && !(reference === undefined && dimensions.columns.length > 0)) continue;
+      if (reference === undefined) unresolved += 1;
+      else cells.push(reference);
+    }
   }
-  return cells.sort((left, right) => left.row - right.row || left.column - right.column);
+  return { cells: cells.sort((left, right) => left.row - right.row || left.column - right.column), unresolved };
+}
+
+function concealedCells(xml: string): CellInfo[] {
+  return concealedCellSummary(xml).cells;
+}
+
+function unresolvedConcealedValues(xml: string): number {
+  return concealedCellSummary(xml).unresolved;
+}
+
+function sharedStringCells(xml: string, cells: readonly string[]): string[] {
+  const targets = new Set(cells.map((reference) => cellInfo(reference)?.reference).filter((reference): reference is string => reference !== undefined));
+  return Array.from(xml.matchAll(new RegExp(`<${localElement("c")}\\b([^>]*?)(?:\\/>|>[\\s\\S]*?<\\/${localElement("c")}>)`, "gi")))
+    .filter((match) => xmlAttribute(match[1] ?? "", "t")?.toLowerCase() === "s")
+    .map((match) => cellInfo(xmlAttribute(match[1] ?? "", "r") ?? "")?.reference)
+    .filter((reference): reference is string => reference !== undefined && targets.has(reference));
 }
 
 function concealedCellsByWorksheet(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Record<string, string[]> {
@@ -233,6 +263,16 @@ function concealedCellsByWorksheet(files: Record<string, Uint8Array>, sheets: re
     if (!sheet.path || !files[sheet.path]) continue;
     const cells = concealedCells(decoder.decode(files[sheet.path]!)).map((cell) => cell.reference);
     if (cells.length > 0) result[sheet.path] = cells;
+  }
+  return result;
+}
+
+function unresolvedConcealedValuesByWorksheet(files: Record<string, Uint8Array>, sheets: readonly SheetInfo[]): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const sheet of sheets) {
+    if (!sheet.path || !files[sheet.path]) continue;
+    const count = unresolvedConcealedValues(decoder.decode(files[sheet.path]!));
+    if (count > 0) result[sheet.path] = count;
   }
   return result;
 }
@@ -445,10 +485,11 @@ function buildPlan(
   artifactSha256: string,
   engineVersion: string,
   unknownMembers: readonly string[],
+  unresolvedByWorksheet: Record<string, number>,
 ): RepairPlan | undefined {
   const hidden = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
   const concealedByWorksheet = concealedCellsByWorksheet(files, sheets);
-  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0) return undefined;
+  if (hidden.length === 0 && Object.keys(concealedByWorksheet).length === 0 && Object.keys(unresolvedByWorksheet).length === 0) return undefined;
   const relationships = relationshipEntries(files);
   const dependencies = emptyDependencies();
   const reasons: string[] = [];
@@ -537,9 +578,13 @@ function buildPlan(
 
   for (const sheet of sheets.filter((candidate) => candidate.state !== "hidden" && candidate.state !== "veryhidden")) {
     const cells = concealedByWorksheet[sheet.path] ?? [];
-    if (cells.length === 0) continue;
+    const unresolvedCount = unresolvedByWorksheet[sheet.path] ?? 0;
+    if (cells.length === 0 && unresolvedCount === 0) continue;
     const sheetDependencies: string[] = [];
     const dependentMembers = new Set<string>();
+    if (unresolvedCount > 0) sheetDependencies.push(`${unresolvedCount} concealed value(s) without an exact cell reference`);
+    const sharedCellReferences = sharedStringCells(decoder.decode(files[sheet.path] ?? new Uint8Array()), cells);
+    if (sharedCellReferences.length > 0) sheetDependencies.push("shared-string value in xl/sharedStrings.xml");
     for (const [member, bytes] of Object.entries(files)) {
       const xml = decoder.decode(bytes);
       const relatedToSheet = member === sheet.path || memberIsRelatedToWorksheet(member, sheet.path, relationships);
@@ -643,9 +688,10 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   const hiddenSheets = sheets.filter((sheet) => sheet.state === "hidden" || sheet.state === "veryhidden");
   if (hiddenSheets.length > 0) findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
   const concealed = concealedCellsByWorksheet(files, sheets);
-  const concealedValueCount = Object.values(concealed).reduce((count, cells) => count + cells.length, 0);
+  const unresolved = unresolvedConcealedValuesByWorksheet(files, sheets);
+  const concealedValueCount = Object.values(concealed).reduce((count, cells) => count + cells.length, 0) + Object.values(unresolved).reduce((count, value) => count + value, 0);
   if (concealedValueCount > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: concealedValueCount });
-  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers);
+  const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers, unresolved);
   return { files, sheets, findings, profileAccepted, unknownMembers, ...(plan ? { plan } : {}) };
 }
 

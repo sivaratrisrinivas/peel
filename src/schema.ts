@@ -191,6 +191,14 @@ function parseStringArray(value: unknown, path: string, minimum = 0): string[] {
   return value.map((item, index) => stringValue(item, `${path}[${index}]`));
 }
 
+function parseCellReferenceArray(value: unknown, path: string): string[] {
+  const references = parseStringArray(value, path, 1);
+  if (references.some((reference) => !/^[A-Z]{1,3}[1-9][0-9]*$/.test(reference))) {
+    throw new SchemaError(`${path} must contain uppercase A1-style cell references`);
+  }
+  return references;
+}
+
 function parseDependencyAnalysis(value: unknown): DependencyAnalysis {
   const input = record(value, "repair_plan.dependency_analysis");
   const keys = [
@@ -224,7 +232,7 @@ function parseRepairAction(value: unknown, index: number): RepairAction {
   return {
     kind,
     ...common,
-    cell_references: parseStringArray(input.cell_references, `${path}.cell_references`, 1),
+    cell_references: parseCellReferenceArray(input.cell_references, `${path}.cell_references`),
   };
 }
 

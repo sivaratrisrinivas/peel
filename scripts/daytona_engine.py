@@ -237,18 +237,47 @@ def _hidden_dimension_ranges(xml: str) -> tuple[set[int], list[tuple[int, int]]]
     return rows, columns
 
 
-def _concealed_cells(xml: str) -> list[str]:
-    hidden_rows, hidden_columns = _hidden_dimension_ranges(xml)
+def _concealed_cell_summary(xml: str) -> tuple[list[str], int]:
+    _, hidden_columns = _hidden_dimension_ranges(xml)
     cells: list[tuple[int, int, str]] = []
-    for match in re.finditer(rf"<{_local_element('c')}\b([^>]*?)(?:/>|>([\s\S]*?)</{_local_element('c')}>)", xml, re.IGNORECASE):
-        reference = _cell_info(_xml_attribute(match.group(1), "r") or "")
-        if reference is None or not re.search(rf"<{_local_element('f|v|is')}\b", match.group(2) or "", re.IGNORECASE):
+    unresolved = 0
+    row_pattern = re.compile(rf"<{_local_element('row')}\b([^>]*)>([\s\S]*?)</{_local_element('row')}>", re.IGNORECASE)
+    cell_pattern = re.compile(rf"<{_local_element('c')}\b([^>]*?)(?:/>|>([\s\S]*?)</{_local_element('c')}>)", re.IGNORECASE)
+    for row_match in row_pattern.finditer(xml):
+        row_hidden = bool(re.search(r"(?:^|\s)hidden=[\"'](?:1|true)[\"']", row_match.group(1), re.IGNORECASE))
+        for cell_match in cell_pattern.finditer(row_match.group(2)):
+            if not re.search(rf"<{_local_element('f|v|is')}\b", cell_match.group(2) or "", re.IGNORECASE):
+                continue
+            reference = _cell_info(_xml_attribute(cell_match.group(1), "r") or "")
+            hidden_column = reference is not None and any(minimum <= reference[1] <= maximum for minimum, maximum in hidden_columns)
+            if not row_hidden and not hidden_column and not (reference is None and hidden_columns):
+                continue
+            if reference is None:
+                unresolved += 1
+            else:
+                cells.append((reference[2], reference[1], reference[0]))
+    return [reference for _, _, reference in sorted(cells)], unresolved
+
+
+def _concealed_cells(xml: str) -> list[str]:
+    return _concealed_cell_summary(xml)[0]
+
+
+def _unresolved_concealed_values(xml: str) -> int:
+    return _concealed_cell_summary(xml)[1]
+
+
+def _shared_string_cells(xml: str, cells: list[str]) -> list[str]:
+    targets = {parsed[0] for value in cells if (parsed := _cell_info(value)) is not None}
+    cell_pattern = re.compile(rf"<{_local_element('c')}\b([^>]*?)(?:/>|>([\s\S]*?)</{_local_element('c')}>)", re.IGNORECASE)
+    result: list[str] = []
+    for match in cell_pattern.finditer(xml):
+        if (_xml_attribute(match.group(1), "t") or "").lower() != "s":
             continue
-        normalized, column, row = reference
-        hidden_column = any(minimum <= column <= maximum for minimum, maximum in hidden_columns)
-        if row in hidden_rows or hidden_column:
-            cells.append((row, column, normalized))
-    return [reference for _, _, reference in sorted(cells)]
+        reference = _cell_info(_xml_attribute(match.group(1), "r") or "")
+        if reference is not None and reference[0] in targets:
+            result.append(reference[0])
+    return result
 
 
 def _concealed_cells_by_worksheet(files: dict[str, bytes], sheets: list[dict[str, str]]) -> dict[str, list[str]]:
@@ -258,6 +287,16 @@ def _concealed_cells_by_worksheet(files: dict[str, bytes], sheets: list[dict[str
         if sheet["path"] in files
         for cells in [_concealed_cells(files[sheet["path"]].decode("utf-8"))]
         if cells
+    }
+
+
+def _unresolved_concealed_values_by_worksheet(files: dict[str, bytes], sheets: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        sheet["path"]: count
+        for sheet in sheets
+        if sheet["path"] in files
+        for count in [_unresolved_concealed_values(files[sheet["path"]].decode("utf-8"))]
+        if count
     }
 
 
@@ -467,10 +506,11 @@ def _build_repair_plan(
     sheets: list[dict[str, str]],
     findings: list[dict[str, Any]],
     artifact_sha256: str,
+    unresolved_by_worksheet: dict[str, int],
 ) -> dict[str, Any] | None:
     hidden = [sheet for sheet in sheets if sheet["state"] in {"hidden", "veryhidden"}]
     concealed_by_worksheet = _concealed_cells_by_worksheet(files, sheets)
-    if not hidden and not concealed_by_worksheet:
+    if not hidden and not concealed_by_worksheet and not unresolved_by_worksheet:
         return None
     dependencies = _empty_dependency_analysis()
     relationships = _relationship_entries(files)
@@ -565,10 +605,16 @@ def _build_repair_plan(
         if sheet["state"] in {"hidden", "veryhidden"}:
             continue
         cells = concealed_by_worksheet.get(sheet["path"], [])
-        if not cells:
+        unresolved_count = unresolved_by_worksheet.get(sheet["path"], 0)
+        if not cells and not unresolved_count:
             continue
         sheet_reasons: list[str] = []
         dependent_members: set[str] = set()
+        if unresolved_count:
+            sheet_reasons.append(f"{unresolved_count} concealed value(s) without an exact cell reference")
+        shared_cell_references = _shared_string_cells(files[sheet["path"]].decode("utf-8"), cells)
+        if shared_cell_references:
+            sheet_reasons.append("shared-string value in xl/sharedStrings.xml")
         for member, payload in files.items():
             xml = payload.decode("utf-8", errors="strict") if member.endswith((".xml", ".rels")) else ""
             related_to_sheet = member == sheet["path"] or _member_is_related_to_worksheet(member, sheet["path"], relationships)
@@ -672,7 +718,8 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
     if hidden:
         findings.append({"mechanism": "hidden_worksheet", "location": "xl/workbook.xml", "count": len(hidden)})
     concealed = _concealed_cells_by_worksheet(files, sheets)
-    concealed_value_count = sum(len(cells) for cells in concealed.values())
+    unresolved = _unresolved_concealed_values_by_worksheet(files, sheets)
+    concealed_value_count = sum(len(cells) for cells in concealed.values()) + sum(unresolved.values())
     if concealed_value_count:
         findings.append({"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": concealed_value_count})
     return {
@@ -681,7 +728,7 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
         "findings": findings,
         "profile_accepted": True,
         "unknown": unknown,
-        "plan": _build_repair_plan(files, sheets, findings, artifact_sha256),
+        "plan": _build_repair_plan(files, sheets, findings, artifact_sha256, unresolved),
     }
 
 

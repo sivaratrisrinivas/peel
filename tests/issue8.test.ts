@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ArtifactReference } from "../src/contracts.js";
 import { FakeClock, FakeScopeAssessor, InMemoryArtifactStore, PeelDaemon } from "../src/daemon.js";
 import { repairPlanHash } from "../src/identity.js";
+import { parseEngineScanResult } from "../src/schema.js";
 
 const RECIPIENT = "recipient@example.test";
 const text = new TextEncoder();
@@ -143,6 +144,28 @@ describe("Issue #8 concealed values Attack", () => {
     expect(daemon.readReveal(result.run.run_id, reveal.reference)).toBeUndefined();
   });
 
+  it("refuses concealed values without exact references and shared-string storage", async () => {
+    const missingReference = setup(workbook("<worksheet><sheetData><row r='2' hidden='1'><c t='inlineStr'><is><t>secret</t></is></c></row></sheetData></worksheet>"));
+    const missingResult = await scan(missingReference.daemon, missingReference.artifact);
+    expect(missingResult.ok).toBe(false);
+    if (missingResult.ok) return;
+    expect(missingResult.error.code).toBe("repair_refused");
+    expect(missingResult.run?.scan?.findings).toEqual([
+      { mechanism: "hidden_row_or_column", location: "xl/worksheets", count: 1 },
+    ]);
+    expect(missingResult.run?.repair_plan?.refusal_reasons?.join(" ")).toContain("without an exact cell reference");
+
+    const sharedString = setup(workbook(
+      "<worksheet><sheetData><row r='2' hidden='1'><c r='A2' t='s'><v>0</v></c></row></sheetData></worksheet>",
+      { "xl/sharedStrings.xml": text.encode("<sst><si><t>secret</t></si></sst>") },
+    ));
+    const sharedResult = await scan(sharedString.daemon, sharedString.artifact);
+    expect(sharedResult.ok).toBe(false);
+    if (sharedResult.ok) return;
+    expect(sharedResult.error.code).toBe("repair_refused");
+    expect(sharedResult.run?.repair_plan?.refusal_reasons?.join(" ")).toContain("shared-string value");
+  });
+
   it("creates one approval-bound atomic plan, clears only concealed values, and verifies fidelity", async () => {
     const base = setup(workbook(concealedWorksheet()));
     const result = await scan(base.daemon, base.artifact);
@@ -222,11 +245,52 @@ describe("Issue #8 dependency refusal", () => {
   });
 
   it("refuses malformed worksheet XML before producing a Repair Plan", async () => {
-    const base = setup(workbook("<worksheet><sheetData></worksheet>"));
+    const base = setup(workbook("<worksheet><sheetData/></worksheet>trailing"));
     const result = await scan(base.daemon, base.artifact);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.run.state).toBe("refused");
     expect(result.run.scan?.status).toBe("refused");
+  });
+
+  it("rejects non-canonical concealed cell references at the engine contract boundary", () => {
+    const emptyDependencies = {
+      visible_formulas: [],
+      defined_names: [],
+      data_validation: [],
+      tables: [],
+      charts: [],
+      pivots: [],
+      package_relationships: [],
+      macros: [],
+      external_connections: [],
+    };
+    expect(() => parseEngineScanResult({
+      version: "1",
+      operation: "scan",
+      status: "findings",
+      artifact_sha256: "a".repeat(64),
+      engine_version: "1.0.0",
+      supported_profile: "accepted",
+      findings: [{ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: 1 }],
+      repair_plan: {
+        version: "1",
+        operation: "repair_plan",
+        status: "eligible",
+        artifact_sha256: "a".repeat(64),
+        engine_version: "1.0.0",
+        dependency_analysis: emptyDependencies,
+        actions: [{
+          kind: "clear_hidden_cell_values",
+          worksheet: "Visible",
+          target_member: "xl/worksheets/sheet1.xml",
+          cell_references: ["a2"],
+          changed_members: ["xl/worksheets/sheet1.xml"],
+          capability_losses: ["value is cleared"],
+        }],
+        changed_members: ["xl/worksheets/sheet1.xml"],
+        capability_losses: ["value is cleared"],
+      },
+    })).toThrow(/uppercase A1-style/);
   });
 });
