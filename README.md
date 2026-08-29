@@ -189,8 +189,14 @@ structures are refused.
 
 The public fixture provenance and derivation are recorded in
 [`docs/evidence/pivot-cache-fixture-2026-08-29.md`](docs/evidence/pivot-cache-fixture-2026-08-29.md).
-Qodo review evidence will be added here after the implementation pull request
-and its follow-up review complete.
+
+Qodo's [initial review of PR #18](https://github.com/sivaratrisrinivas/peel/pull/18#issuecomment-5464175904)
+found six High correctness bugs. The fixes are in commit `b1bc9bf`, covering
+concealed cells, missing-record locations, cache-only proof, self-closing XML,
+namespace prefixes, and cache-field alignment. Qodo's [follow-up on that
+commit](https://github.com/sivaratrisrinivas/peel/pull/18#issuecomment-5464175904)
+reports zero bugs, rule violations, and skill insights. No findings were
+dismissed or deferred.
 
 Qodo reviewed [PR #14](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460451535)
 and found zero bugs, rule violations, or requirement gaps. Its [final pass](https://github.com/sivaratrisrinivas/peel/pull/14#issuecomment-5460483810)
