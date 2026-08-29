@@ -203,6 +203,46 @@ describe("Issue #6 hidden worksheet Repair journey", () => {
     expect(disclosure.ok).toBe(true);
   });
 
+  it("matches namespace-prefixed OOXML and XML-escaped worksheet references", async () => {
+    const bytes = workbook(
+      "<x:sheetData xmlns:x=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>",
+      {
+        "xl/workbook.xml": text.encode(
+          `<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="Visible" sheetId="1" r:id="rId1"/><x:sheet name="R&amp;D" sheetId="2" state="veryHidden" r:id="rId2"/></x:sheets></x:workbook>`,
+        ),
+        "xl/worksheets/sheet1.xml": text.encode(
+          `<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData><x:row><x:c><x:f>'R&amp;D'!A1</x:f></x:c></x:row></x:sheetData></x:worksheet>`,
+        ),
+      },
+    );
+    const { artifact, daemon } = setup(bytes);
+    const { scanned } = await scanForRepair(daemon, artifact);
+    expect(scanned.ok).toBe(false);
+    if (scanned.ok) return;
+    expect(scanned.error.code).toBe("repair_refused");
+    expect(scanned.run?.scan?.findings).toEqual([{ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: 1 }]);
+    expect(scanned.run?.repair_plan?.dependency_analysis.visible_formulas).toContain("xl/worksheets/sheet1.xml");
+  });
+
+  it("uses a valid default XML content type without rewriting the content-types member", async () => {
+    const bytes = workbook("<sheetData/>", {
+      "[Content_Types].xml": text.encode(
+        `<Types><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>`,
+      ),
+    });
+    const { artifact, artifacts, daemon } = setup(bytes);
+    const { scanned } = await scanForRepair(daemon, artifact);
+    expect(scanned.ok).toBe(true);
+    if (!scanned.ok || !scanned.repair_approval || !scanned.run.repair_plan) return;
+    expect(scanned.run.repair_plan.changed_members).not.toContain("[Content_Types].xml");
+    const applied = await daemon.execute(applyCommand(scanned.run, scanned.repair_approval));
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(unzipSync(artifacts.read(applied.run.artifact))["[Content_Types].xml"]).toEqual(
+      unzipSync(bytes)["[Content_Types].xml"],
+    );
+  });
+
   it("records every declared dependency capability and refuses unsafe Repair", async () => {
     const rich = workbook(
       `<sheetData><row r="1"><c r="A1"><f>'Hidden'!A1</f><v>1</v></c></row></sheetData><dataValidations><dataValidation><formula1>'Hidden'!$A$1</formula1></dataValidation></dataValidations>`,

@@ -177,6 +177,7 @@ export class FakeDisclosureMailer implements DisclosureMailer {
 
 interface BridgeResponse {
   result?: unknown;
+  candidate_bytes_base64?: unknown;
   status?: unknown;
 }
 
@@ -219,12 +220,12 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
   }
 
   scan(reference: ArtifactReference): EngineScanResult {
-    return this.invoke("scan", reference) as EngineScanResult;
+    const response = this.invoke("scan", reference);
+    return response.result as EngineScanResult;
   }
 
   repair(reference: ArtifactReference, plan: RepairPlan): EngineRepairResult {
     const response = this.invoke("repair", reference, undefined, plan);
-    if (!isRecord(response)) throw new Error("Daytona repair returned no result");
     const result = response.result;
     if (!isRecord(result)) throw new Error("Daytona repair returned an invalid result");
     if (result.status !== "repaired") return result as unknown as EngineRepairResult;
@@ -245,7 +246,8 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
     plan?: RepairPlan,
     originalReference?: ArtifactReference,
   ): EngineVerifyResult {
-    return this.invoke("verify", reference, originalArtifactSha256, plan, originalReference) as EngineVerifyResult;
+    const response = this.invoke("verify", reference, originalArtifactSha256, plan, originalReference);
+    return response.result as EngineVerifyResult;
   }
 
   private invoke(
@@ -254,7 +256,7 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
     originalArtifactSha256?: string,
     plan?: RepairPlan,
     originalReference?: ArtifactReference,
-  ): unknown {
+  ): BridgeResponse {
     const bytes = this.artifacts.read(reference);
     const response = runPythonBridge(this.bridgePath, {
       operation,
@@ -269,7 +271,7 @@ export class DaytonaWorkbookEngine implements EngineAdapter {
       ...(originalReference ? { original_bytes_base64: Buffer.from(this.artifacts.read(originalReference)).toString("base64") } : {}),
     });
     if (!isRecord(response.result)) throw new Error("Daytona engine returned no result");
-    return response.result;
+    return response;
   }
 }
 
@@ -337,6 +339,10 @@ function allowedProfilePart(name: string): boolean {
   );
 }
 
+function localElement(element: string): string {
+  return `(?:[A-Za-z_][\\w.-]*:)?(?:${element})`;
+}
+
 function profileIsAccepted(files: Record<string, Uint8Array>): boolean {
   const contentTypes = files["[Content_Types].xml"];
   const workbook = files["xl/workbook.xml"];
@@ -349,14 +355,14 @@ function profileIsAccepted(files: Record<string, Uint8Array>): boolean {
 function hiddenFindings(workbook: Uint8Array, files: Record<string, Uint8Array>): Finding[] {
   const workbookXml = new TextDecoder().decode(workbook);
   const findings: Finding[] = [];
-  const hiddenSheets = workbookXml.match(/<sheet\b[^>]*\bstate=["'](?:hidden|veryHidden)["'][^>]*>/gi) ?? [];
+  const hiddenSheets = workbookXml.match(new RegExp(`<${localElement("sheet")}\\b[^>]*\\bstate=["'](?:hidden|veryHidden)["'][^>]*>`, "gi")) ?? [];
   if (hiddenSheets.length > 0) {
     findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
   }
   const hiddenRowsOrColumns = Object.entries(files).reduce((count, [name, bytes]) => {
     if (!name.startsWith("xl/worksheets/") || !name.endsWith(".xml")) return count;
     const xml = new TextDecoder().decode(bytes);
-    return count + (xml.match(/<(?:row|col)\b[^>]*\bhidden=["'](?:1|true)["'][^>]*>/gi) ?? []).length;
+    return count + (xml.match(new RegExp(`<${localElement("row|col")}\\b[^>]*\\bhidden=["'](?:1|true)["'][^>]*>`, "gi")) ?? []).length;
   }, 0);
   if (hiddenRowsOrColumns > 0) {
     findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: hiddenRowsOrColumns });
@@ -385,7 +391,7 @@ function decodeXml(value: string): string {
 }
 
 function workbookSheets(workbookXml: string): WorkbookSheet[] {
-  return Array.from(workbookXml.matchAll(/<sheet\b([^>]*)\/?>(?:<\/sheet>)?/gi), (match) => ({
+  return Array.from(workbookXml.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => ({
     name: decodeXml(xmlAttribute(match[1]!, "name") ?? ""),
     state: xmlAttribute(match[1]!, "state")?.toLowerCase(),
     relationshipId: xmlAttribute(match[1]!, "r:id") ?? xmlAttribute(match[1]!, "id") ?? "",

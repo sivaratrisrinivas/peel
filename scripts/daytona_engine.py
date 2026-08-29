@@ -93,6 +93,10 @@ def _xml_attribute(attributes: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _local_element(element: str) -> str:
+    return rf"(?:[A-Za-z_][\w.-]*:)?(?:{element})"
+
+
 def _decode_xml(value: str) -> str:
     return (
         value.replace("&lt;", "<")
@@ -138,7 +142,7 @@ def _relationship_entries(files: dict[str, bytes]) -> list[dict[str, str]]:
         if not member.endswith(".rels"):
             continue
         xml = payload.decode("utf-8")
-        for match in re.finditer(r"<Relationship\b([^>]*)/?>(?:</Relationship>)?", xml, re.IGNORECASE):
+        for match in re.finditer(rf"<{_local_element('Relationship')}\b([^>]*)/?>(?:</{_local_element('Relationship')}>)?", xml, re.IGNORECASE):
             attributes = match.group(1)
             target = _xml_attribute(attributes, "Target")
             if not target or (_xml_attribute(attributes, "TargetMode") or "").lower() == "external":
@@ -158,14 +162,14 @@ def _workbook_sheets(files: dict[str, bytes]) -> list[dict[str, str]]:
     workbook = files["xl/workbook.xml"].decode("utf-8")
     relationships: dict[str, str] = {}
     rels = files.get("xl/_rels/workbook.xml.rels", b"").decode("utf-8")
-    for match in re.finditer(r"<Relationship\b([^>]*)/?>(?:</Relationship>)?", rels, re.IGNORECASE):
+    for match in re.finditer(rf"<{_local_element('Relationship')}\b([^>]*)/?>(?:</{_local_element('Relationship')}>)?", rels, re.IGNORECASE):
         attributes = match.group(1)
         relationship_id = _xml_attribute(attributes, "Id")
         target = _xml_attribute(attributes, "Target")
         if relationship_id and target and (_xml_attribute(attributes, "TargetMode") or "").lower() != "external":
             relationships[relationship_id] = _relationship_target("xl/_rels/workbook.xml.rels", target)
     sheets: list[dict[str, str]] = []
-    for match in re.finditer(r"<sheet\b([^>]*)/?>(?:</sheet>)?", workbook, re.IGNORECASE):
+    for match in re.finditer(rf"<{_local_element('sheet')}\b([^>]*)/?>(?:</{_local_element('sheet')}>)?", workbook, re.IGNORECASE):
         attributes = match.group(1)
         relationship_id = _xml_attribute(attributes, "r:id") or _xml_attribute(attributes, "id") or ""
         sheets.append(
@@ -180,6 +184,7 @@ def _workbook_sheets(files: dict[str, bytes]) -> list[dict[str, str]]:
 
 
 def _contains_sheet_reference(xml: str, sheet: dict[str, str]) -> bool:
+    xml = _decode_xml(xml)
     name = sheet["name"].replace("'", "''")
     if not name:
         return False
@@ -192,7 +197,7 @@ def _contains_sheet_reference(xml: str, sheet: dict[str, str]) -> bool:
 
 
 def _matching_element(xml: str, element: str, sheet: dict[str, str]) -> bool:
-    return any(_contains_sheet_reference(match.group(0), sheet) for match in re.finditer(rf"<{element}\b[^>]*>[\s\S]*?</{element}>", xml, re.IGNORECASE))
+    return any(_contains_sheet_reference(match.group(0), sheet) for match in re.finditer(rf"<{_local_element(element)}\b[^>]*>[\s\S]*?</{_local_element(element)}>", xml, re.IGNORECASE))
 
 
 def _empty_dependency_analysis() -> dict[str, list[str]]:
@@ -227,10 +232,20 @@ def _worksheet_relationship_member(path: str) -> str:
     return f"{directory + '/' if directory else ''}_rels/{filename}.rels"
 
 
+def _has_content_type_override(files: dict[str, bytes], target: str) -> bool:
+    content_types = files.get("[Content_Types].xml", b"").decode("utf-8")
+    for match in re.finditer(rf"<{_local_element('Override')}\b([^>]*?)(?:/>|>[\s\S]*?</{_local_element('Override')}>)", content_types, re.IGNORECASE):
+        part_name = _xml_attribute(match.group(1), "PartName")
+        if part_name is not None and _normalize_path(part_name) == target:
+            return True
+    return False
+
+
 def _repair_action(sheet: dict[str, str], files: dict[str, bytes]) -> dict[str, Any]:
     relationship_part = _worksheet_relationship_member(sheet["path"])
     changed = _unique(
-        ["[Content_Types].xml", "xl/_rels/workbook.xml.rels", "xl/workbook.xml", sheet["path"]]
+        (["[Content_Types].xml"] if _has_content_type_override(files, sheet["path"]) else [])
+        + ["xl/_rels/workbook.xml.rels", "xl/workbook.xml", sheet["path"]]
         + ([relationship_part] if relationship_part in files else [])
     )
     return {
@@ -239,8 +254,9 @@ def _repair_action(sheet: dict[str, str], files: dict[str, bytes]) -> dict[str, 
         "target_member": sheet["path"],
         "changed_members": changed,
         "capability_losses": [
-            f"The hidden worksheet {sheet['name']} and its cell values will be removed.",
-            "Workbook behavior that depends on this worksheet was checked and is not included in the supported Repair Plan.",
+            f"The hidden worksheet {sheet['name']}, its cells, hidden state, row and column metadata, and sheet-local formatting will be removed.",
+            "No visible formulas, defined names, data validation, tables, charts, pivots, package relationships, macros, or external connections reference this worksheet; none of those capabilities are changed by this plan.",
+            "The structural Repair does not recalculate workbook formulas or cached values after the worksheet is removed.",
         ],
     }
 
@@ -387,7 +403,7 @@ def _inspect_package(path: Path, artifact_sha256: str) -> dict[str, Any]:
     hidden_rows = 0
     for name, payload in files.items():
         if name.startswith("xl/worksheets/") and name.endswith(".xml"):
-            hidden_rows += len(re.findall(r"<(?:row|col)\b[^>]*\bhidden=[\"'](?:1|true)[\"'][^>]*>", payload.decode("utf-8"), re.IGNORECASE))
+            hidden_rows += len(re.findall(rf"<{_local_element('row|col')}\b[^>]*\bhidden=[\"'](?:1|true)[\"'][^>]*>", payload.decode("utf-8"), re.IGNORECASE))
     if hidden_rows:
         findings.append({"mechanism": "hidden_row_or_column", "location": "xl/worksheets", "count": hidden_rows})
     return {
@@ -519,7 +535,7 @@ def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> d
             relationship_id = _xml_attribute(attributes, "r:id") or _xml_attribute(attributes, "id") or ""
             return ""
 
-        workbook = re.sub(r"<sheet\b([^>]*?)(?:/>|>[\s\S]*?</sheet>)", remove_sheet, workbook, flags=re.IGNORECASE)
+        workbook = re.sub(rf"<{_local_element('sheet')}\b([^>]*?)(?:/>|>[\s\S]*?</{_local_element('sheet')}>)", remove_sheet, workbook, flags=re.IGNORECASE)
         if not relationship_id:
             raise ValueError("repair worksheet target is missing")
 
@@ -527,21 +543,23 @@ def _repair_package(path: Path, artifact_sha256: str, plan: dict[str, Any]) -> d
             attributes = match.group(1)
             return "" if _xml_attribute(attributes, "Id") == relationship_id else match.group(0)
 
-        relationships = re.sub(r"<Relationship\b([^>]*?)(?:/>|>[\s\S]*?</Relationship>)", remove_relationship, relationships, flags=re.IGNORECASE)
+        relationships = re.sub(rf"<{_local_element('Relationship')}\b([^>]*?)(?:/>|>[\s\S]*?</{_local_element('Relationship')}>)", remove_relationship, relationships, flags=re.IGNORECASE)
         target = action["target_member"]
 
         def remove_content_type(match: re.Match[str]) -> str:
             attributes = match.group(1)
             return "" if _normalize_path(_xml_attribute(attributes, "PartName") or "") == target else match.group(0)
 
-        content_types = re.sub(r"<Override\b([^>]*?)(?:/>|>[\s\S]*?</Override>)", remove_content_type, content_types, flags=re.IGNORECASE)
+        if "[Content_Types].xml" in plan["changed_members"]:
+            content_types = re.sub(rf"<{_local_element('Override')}\b([^>]*?)(?:/>|>[\s\S]*?</{_local_element('Override')}>)", remove_content_type, content_types, flags=re.IGNORECASE)
         changes[target] = None
         relationship_part = _worksheet_relationship_member(target)
         if relationship_part in plan["changed_members"]:
             changes[relationship_part] = None
     changes["xl/workbook.xml"] = workbook.encode("utf-8")
     changes["xl/_rels/workbook.xml.rels"] = relationships.encode("utf-8")
-    changes["[Content_Types].xml"] = content_types.encode("utf-8")
+    if "[Content_Types].xml" in plan["changed_members"]:
+        changes["[Content_Types].xml"] = content_types.encode("utf-8")
     changed_members = sorted(changes)
     if changed_members != sorted(plan["changed_members"]):
         raise ValueError("repair changed members are not approved")

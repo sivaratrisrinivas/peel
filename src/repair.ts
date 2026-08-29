@@ -73,7 +73,7 @@ function relationshipEntries(files: Record<string, Uint8Array>): Array<{ source:
   for (const [member, bytes] of Object.entries(files)) {
     if (!member.endsWith(".rels")) continue;
     const xml = decoder.decode(bytes);
-    for (const match of xml.matchAll(/<Relationship\b([^>]*)\/?>(?:<\/Relationship>)?/gi)) {
+    for (const match of xml.matchAll(new RegExp(`<${localElement("Relationship")}\\b([^>]*)\\/?>(?:<\\/${localElement("Relationship")}>)?`, "gi"))) {
       const attributes = match[1] ?? "";
       const target = xmlAttribute(attributes, "Target");
       if (!target || xmlAttribute(attributes, "TargetMode")?.toLowerCase() === "external") continue;
@@ -91,7 +91,7 @@ function relationshipEntries(files: Record<string, Uint8Array>): Array<{ source:
 function workbookRelationshipMap(files: Record<string, Uint8Array>): Map<string, string> {
   const map = new Map<string, string>();
   const xml = decoder.decode(files["xl/_rels/workbook.xml.rels"] ?? new Uint8Array());
-  for (const match of xml.matchAll(/<Relationship\b([^>]*)\/?>(?:<\/Relationship>)?/gi)) {
+  for (const match of xml.matchAll(new RegExp(`<${localElement("Relationship")}\\b([^>]*)\\/?>(?:<\\/${localElement("Relationship")}>)?`, "gi"))) {
     const attributes = match[1] ?? "";
     const id = xmlAttribute(attributes, "Id");
     const target = xmlAttribute(attributes, "Target");
@@ -105,7 +105,7 @@ function workbookRelationshipMap(files: Record<string, Uint8Array>): Map<string,
 function workbookSheets(files: Record<string, Uint8Array>): SheetInfo[] {
   const workbook = decoder.decode(files["xl/workbook.xml"] ?? new Uint8Array());
   const relationships = workbookRelationshipMap(files);
-  return Array.from(workbook.matchAll(/<sheet\b([^>]*)\/?>(?:<\/sheet>)?/gi), (match) => {
+  return Array.from(workbook.matchAll(new RegExp(`<${localElement("sheet")}\\b([^>]*)\\/?>(?:<\\/${localElement("sheet")}>)?`, "gi")), (match) => {
     const attributes = match[1] ?? "";
     const relationshipId = xmlAttribute(attributes, "r:id") ?? xmlAttribute(attributes, "id") ?? "";
     return {
@@ -144,8 +144,13 @@ function unique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
+function localElement(element: string): string {
+  return `(?:[A-Za-z_][\\w.-]*:)?(?:${element})`;
+}
+
 function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
   if (sheet.name.length === 0) return false;
+  xml = decodeXml(xml);
   const name = sheet.name.replace(/'/g, "''");
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?:'${escaped}'|${escaped})!`, "i").test(xml) ||
@@ -154,7 +159,7 @@ function includesSheetReference(xml: string, sheet: SheetInfo): boolean {
 }
 
 function matchingElements(xml: string, element: string, sheet: SheetInfo): boolean {
-  for (const match of xml.matchAll(new RegExp(`<${element}\\b[^>]*>([\\s\\S]*?)</${element}>`, "gi"))) {
+  for (const match of xml.matchAll(new RegExp(`<${localElement(element)}\\b[^>]*>([\\s\\S]*?)</${localElement(element)}>`, "gi"))) {
     if (includesSheetReference(match[0] ?? "", sheet)) return true;
   }
   return false;
@@ -194,7 +199,7 @@ function actionFor(sheet: SheetInfo, files: Record<string, Uint8Array>): RepairA
   const target = sheet.path;
   const relationshipPart = worksheetRelationshipMember(target);
   const changed = unique([
-    "[Content_Types].xml",
+    ...(hasContentTypeOverride(files, target) ? ["[Content_Types].xml"] : []),
     "xl/_rels/workbook.xml.rels",
     "xl/workbook.xml",
     target,
@@ -211,6 +216,15 @@ function actionFor(sheet: SheetInfo, files: Record<string, Uint8Array>): RepairA
       "The structural Repair does not recalculate workbook formulas or cached values after the worksheet is removed.",
     ],
   };
+}
+
+function hasContentTypeOverride(files: Record<string, Uint8Array>, target: string): boolean {
+  const xml = decoder.decode(files["[Content_Types].xml"] ?? new Uint8Array());
+  for (const match of xml.matchAll(new RegExp(`<${localElement("Override")}\\b([^>]*)\\/?>(?:<\\/${localElement("Override")}>)?`, "gi"))) {
+    const partName = xmlAttribute(match[1] ?? "", "PartName");
+    if (partName !== undefined && normalizePath(partName) === target) return true;
+  }
+  return false;
 }
 
 function buildPlan(
@@ -359,7 +373,7 @@ function inspectPackage(bytes: Uint8Array, artifactSha256: string, engineVersion
   if (hiddenSheets.length > 0) findings.push({ mechanism: "hidden_worksheet", location: "xl/workbook.xml", count: hiddenSheets.length });
   const hiddenRows = Object.entries(files).reduce((count, [name, member]) => {
     if (!name.startsWith("xl/worksheets/") || !name.endsWith(".xml")) return count;
-    return count + (decoder.decode(member).match(/<(?:row|col)\b[^>]*\bhidden=["'](?:1|true)["'][^>]*>/gi) ?? []).length;
+    return count + (decoder.decode(member).match(new RegExp(`<${localElement("row|col")}\\b[^>]*\\bhidden=["'](?:1|true)["'][^>]*>`, "gi")) ?? []).length;
   }, 0);
   if (hiddenRows > 0) findings.push({ mechanism: "hidden_row_or_column", location: "xl/worksheets", count: hiddenRows });
   const plan = buildPlan(files, sheets, findings, artifactSha256, engineVersion, unknownMembers);
@@ -394,7 +408,7 @@ export function scanWorkbook(bytes: Uint8Array, artifactSha256: string): EngineS
 
 function removeSheet(xml: string, name: string): { xml: string; relationshipId: string } {
   let relationshipId = "";
-  const result = xml.replace(/<sheet\b([^>]*?)(?:\/>|>[\s\S]*?<\/sheet>)/gi, (full, attributes: string) => {
+  const result = xml.replace(new RegExp(`<${localElement("sheet")}\\b([^>]*?)(?:\\/>|>[\\s\\S]*?<\\/${localElement("sheet")}>)`, "gi"), (full, attributes: string) => {
     if (decodeXml(xmlAttribute(attributes, "name") ?? "") !== name) return full;
     relationshipId = xmlAttribute(attributes, "r:id") ?? xmlAttribute(attributes, "id") ?? "";
     return "";
@@ -404,8 +418,8 @@ function removeSheet(xml: string, name: string): { xml: string; relationshipId: 
 }
 
 function removeRelationship(xml: string, id: string): string {
-  const result = xml.replace(/<Relationship\b[^>]*?(?:\/>|>[\s\S]*?<\/Relationship>)/gi, (full) => {
-    const attributes = full.match(/<Relationship\b([^>]*)/i)?.[1] ?? "";
+  const result = xml.replace(new RegExp(`<${localElement("Relationship")}\\b[^>]*?(?:\\/>|>[\\s\\S]*?<\\/${localElement("Relationship")}>)`, "gi"), (full) => {
+    const attributes = full.match(new RegExp(`<${localElement("Relationship")}\\b([^>]*)`, "i"))?.[1] ?? "";
     return xmlAttribute(attributes, "Id") === id ? "" : full;
   });
   if (result === xml) throw new Error(`repair relationship ${id} is missing`);
@@ -414,8 +428,8 @@ function removeRelationship(xml: string, id: string): string {
 
 function removeContentType(xml: string, target: string): string {
   const normalized = `/${target}`;
-  const result = xml.replace(/<Override\b[^>]*?(?:\/>|>[\s\S]*?<\/Override>)/gi, (full) => {
-    const attributes = full.match(/<Override\b([^>]*)/i)?.[1] ?? "";
+  const result = xml.replace(new RegExp(`<${localElement("Override")}\\b[^>]*?(?:\\/>|>[\\s\\S]*?<\\/${localElement("Override")}>)`, "gi"), (full) => {
+    const attributes = full.match(new RegExp(`<${localElement("Override")}\\b([^>]*)`, "i"))?.[1] ?? "";
     return normalizePath(xmlAttribute(attributes, "PartName") ?? "") === target || xmlAttribute(attributes, "PartName") === normalized ? "" : full;
   });
   if (result === xml) throw new Error(`content type for ${target} is missing`);
@@ -434,14 +448,18 @@ export function repairWorkbook(bytes: Uint8Array, plan: RepairPlan, artifactSha2
     const removed = removeSheet(workbook, action.worksheet);
     workbook = removed.xml;
     relationships = removeRelationship(relationships, removed.relationshipId);
-    contentTypes = removeContentType(contentTypes, action.target_member);
+    if (plan.changed_members.includes("[Content_Types].xml")) {
+      contentTypes = removeContentType(contentTypes, action.target_member);
+    }
     changes.set(action.target_member, null);
     const relationshipPart = worksheetRelationshipMember(action.target_member);
     if (plan.changed_members.includes(relationshipPart)) changes.set(relationshipPart, null);
   }
   changes.set("xl/workbook.xml", new TextEncoder().encode(workbook));
   changes.set("xl/_rels/workbook.xml.rels", new TextEncoder().encode(relationships));
-  changes.set("[Content_Types].xml", new TextEncoder().encode(contentTypes));
+  if (plan.changed_members.includes("[Content_Types].xml")) {
+    changes.set("[Content_Types].xml", new TextEncoder().encode(contentTypes));
+  }
   const changedMembers = unique([...changes.keys()]);
   if (canonicalJson(changedMembers) !== canonicalJson(plan.changed_members)) throw new Error("repair changed-member set is not approved");
   return { bytes: surgicalZipRewrite(bytes, changes), changedMembers };
@@ -461,7 +479,7 @@ function relationshipsValid(files: Record<string, Uint8Array>): boolean {
 
 function contentTypesValid(files: Record<string, Uint8Array>): boolean {
   const xml = decoder.decode(files["[Content_Types].xml"] ?? new Uint8Array());
-  for (const match of xml.matchAll(/<Override\b([^>]*)\/?>(?:<\/Override>)?/gi)) {
+  for (const match of xml.matchAll(new RegExp(`<${localElement("Override")}\\b([^>]*)\\/?>(?:<\\/${localElement("Override")}>)?`, "gi"))) {
     const target = normalizePath(xmlAttribute(match[1] ?? "", "PartName") ?? "");
     if (target && !files[target]) return false;
   }

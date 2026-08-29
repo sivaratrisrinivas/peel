@@ -452,6 +452,9 @@ export class PeelDaemon {
       (result.relationships_valid !== true || result.content_types_valid !== true ||
         !result.reopened_with || result.reopened_with.length === 0 ||
         result.artifact_unchanged !== true ||
+        result.remaining_findings.length > 0 ||
+        result.changed_members === undefined ||
+        canonicalJson(result.changed_members) !== canonicalJson(run.repair_plan.changed_members) ||
         result.unexplained_changes === undefined || result.unexplained_changes.length > 0)
     ) {
       this.discardCandidate(run, result);

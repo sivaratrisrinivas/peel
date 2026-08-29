@@ -58,7 +58,7 @@ def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_pa
     source = tmp_path / "hidden.xlsx"
     payload = _workbook(
         source,
-        '<workbook><sheets><sheet name="One" state="hidden"/><sheet name="Two" state="veryHidden"/></sheets></workbook>',
+        '<x:workbook xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheets><x:sheet name="One" state="hidden"/><x:sheet name="Two" state="veryHidden"/></x:sheets></x:workbook>',
     )
     result = daytona_engine._scan_package(source, hashlib.sha256(payload).hexdigest())
 
@@ -66,6 +66,23 @@ def test_production_engine_contract_reports_all_hidden_worksheet_findings(tmp_pa
     assert result["findings"] == [
         {"mechanism": "hidden_worksheet", "location": "xl/workbook.xml", "count": 2}
     ]
+
+
+def test_production_engine_does_not_miss_xml_escaped_sheet_references(tmp_path: Path) -> None:
+    source = tmp_path / "escaped.xlsx"
+    workbook = openpyxl.Workbook()
+    visible = workbook.active
+    visible.title = "Visible"
+    visible["A1"] = "='R&D'!A1"
+    hidden = workbook.create_sheet("R&D")
+    hidden.sheet_state = "veryHidden"
+    hidden["A1"] = "secret"
+    workbook.save(source)
+    payload = source.read_bytes()
+
+    result = daytona_engine._scan_package(source, hashlib.sha256(payload).hexdigest())
+    assert result["repair_plan"]["status"] == "refused"
+    assert "xl/worksheets/sheet1.xml" in result["repair_plan"]["dependency_analysis"]["visible_formulas"]
 
 
 def test_production_engine_repairs_only_approved_ooxml_members(tmp_path: Path) -> None:
