@@ -156,11 +156,13 @@ Reference, plan hash, and engine version. The dependency check covers visible
 formulas, defined names, data validation, tables, charts, pivots, and package
 relationships. Any dependency causes a visible Refusal.
 
-The Repair changes only the planned worksheet member. It keeps hidden
-dimensions, formatting, the original Artifact Reference, and unrelated OOXML
-members. Verification runs every enabled Attack, checks the visible workbook
-content, and reopens the candidate. Malformed or otherwise unprovable packages
-are refused before Repair.
+For a concealed-cell action, the Repair changes only the planned worksheet
+member. It keeps hidden dimensions, formatting, the original Artifact
+Reference, and unrelated OOXML members. A mixed plan can also delete a hidden
+worksheet; that action lists the affected workbook metadata, relationships,
+content types, and worksheet members explicitly. Verification runs every
+enabled Attack, checks the visible workbook content, and reopens the candidate.
+Malformed or otherwise unprovable packages are refused before Repair.
 
 Qodo reviewed [PR #16](https://github.com/sivaratrisrinivas/peel/pull/16#issuecomment-5460590356)
 through implementation commit `10bf668` and reported zero bugs, rule
