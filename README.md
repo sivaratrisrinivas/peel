@@ -105,40 +105,40 @@ Run-bound reference through the command response, and serves values only from
 `GET /v1/runs/<run-id>/reveals/<reference>`. Reveal values are not placed in
 TrueForge/MCP responses, SQLite, or persistent reports.
 
-## Issue #6 hidden-worksheet Repair journey
+## Issue #6 hidden-worksheet repair
 
-The supported Repair scope is deliberately narrow: an unreferenced `hidden` or
-`veryHidden` worksheet in an accepted OOXML package. The engine emits one
-complete Repair Plan containing visible-formula, defined-name, data-validation,
-table, chart, pivot, package-relationship, macro, and external-connection
-dependency analysis, plus explicit capability losses. Any dependency,
+Issue #6 supports repairing an unreferenced `hidden` or `veryHidden` worksheet
+in an accepted OOXML package. The engine creates one complete Repair Plan with
+dependency analysis for visible formulas, defined names, data validation,
+tables, charts, pivots, package relationships, macros, and external
+connections. The plan also names every capability loss. Any dependency,
 unsupported package member, macro, external connection, additional concealed
 mechanism, or unresolved worksheet relationship produces a Refusal.
 
-The native MCP `apply_repair` tool is the only Repair execution boundary. Its
-approval binds the Run, envelope revision, original artifact SHA-256, canonical
-Repair Plan SHA-256, and engine version. Approval expiry, restart, replay,
-revision mutation, and non-invocation leave the original Artifact Reference
+The native MCP `apply_repair` tool is the only way to run a Repair. Its approval
+binds the Run, envelope revision, original artifact SHA-256, canonical Repair
+Plan SHA-256, and engine version. If approval expires, the run restarts or
+replays, or the revision changes, Peel leaves the original Artifact Reference
 unchanged. An approved plan runs in a fresh Daytona sandbox in live mode and
-produces a new candidate; the deterministic fake engine covers the same
-contract in tests.
+produces a new candidate. Tests use a deterministic fake engine for the same
+contract.
 
 The transformer edits only the planned workbook, relationship, and worksheet
-relationship members, plus the content-types member when a worksheet-specific
-override must be removed, and preserves untouched ZIP member payloads
-byte-for-byte. Verification reruns the hidden-worksheet Attack, validates
-relationships and content types, checks the visible-content baseline, and
-reopens the candidate with the available readers. Any remaining Finding,
+relationship members. It also edits the content-types member when it must
+remove a worksheet-specific override. Untouched ZIP member payloads stay
+byte-for-byte identical. Verification reruns the hidden-worksheet Attack,
+validates relationships and content types, checks the visible-content baseline,
+and reopens the candidate with the available readers. Any remaining Finding,
 unexplained member change, parse failure, or reopen failure destroys the
 candidate and ends the Run in Refusal. This issue does not repair hidden rows or
-columns, pivot caches, macros, external connections, or arbitrary unsupported
-OOXML extensions.
+columns, pivot caches, macros, external connections, or unsupported OOXML
+extensions.
 
 The initial [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/13#pullrequestreview-5056601225)
-reported four High-severity and one Medium-severity correctness findings. They
-were fixed in commit `61d5852`; the [follow-up update](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460146206)
-reports zero bugs, rule violations, requirement gaps, or skill insights. No
-findings were dismissed or deferred.
+reported four High-severity and one Medium-severity correctness findings. The
+fixes landed in commit `61d5852`. The [final Qodo update](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460222193)
+for the completed branch reports zero bugs, rule violations, requirement gaps,
+or skill insights. No findings were dismissed or deferred.
 
 ## Current status
 
