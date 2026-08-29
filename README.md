@@ -123,8 +123,9 @@ unchanged. An approved plan runs in a fresh Daytona sandbox in live mode and
 produces a new candidate; the deterministic fake engine covers the same
 contract in tests.
 
-The transformer edits only the planned workbook, relationship, content-type,
-and worksheet relationship members and preserves untouched ZIP member payloads
+The transformer edits only the planned workbook, relationship, and worksheet
+relationship members, plus the content-types member when a worksheet-specific
+override must be removed, and preserves untouched ZIP member payloads
 byte-for-byte. Verification reruns the hidden-worksheet Attack, validates
 relationships and content types, checks the visible-content baseline, and
 reopens the candidate with the available readers. Any remaining Finding,
@@ -132,6 +133,12 @@ unexplained member change, parse failure, or reopen failure destroys the
 candidate and ends the Run in Refusal. This issue does not repair hidden rows or
 columns, pivot caches, macros, external connections, or arbitrary unsupported
 OOXML extensions.
+
+The initial [Qodo review](https://github.com/sivaratrisrinivas/peel/pull/13#pullrequestreview-5056601225)
+reported four High-severity and one Medium-severity correctness findings. They
+were fixed in commit `61d5852`; the [follow-up update](https://github.com/sivaratrisrinivas/peel/pull/13#issuecomment-5460146206)
+reports zero bugs, rule violations, requirement gaps, or skill insights. No
+findings were dismissed or deferred.
 
 ## Current status
 
