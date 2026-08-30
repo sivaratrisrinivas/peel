@@ -33,36 +33,74 @@ exists, the engine returns the Repair Plan and the `ScopeAssessor` only gates
 whether Peel may present that plan for native approval.
 
 ```mermaid
-flowchart TD
-    Draft["Owned Gmail draft"] --> Watcher["MailboxWatcher<br/>IMAP bridge"]
-    Watcher -->|eligible envelope and bytes| Daemon["Peel daemon<br/>HTTP and MCP boundary"]
-    Daemon --> Store[("SQLite Run state<br/>in-memory artifact bytes")]
-    Store --> Scan["Scan<br/>fresh Daytona sandbox"]
-    Scan --> Finding{"Finding?"}
-    Finding -- "No" --> Scanned["Scanned<br/>clean original"]
-    Finding -- "Yes" --> Scope["ScopeAssessor<br/>advisory only"]
-    Finding -- "Yes" --> Plan["Repair Plan from scan"]
-    Scope --> PlanGate{"Scope passes and plan eligible?"}
+flowchart LR
+    subgraph Mailbox["Owned mailbox"]
+        Draft["Gmail draft"] --> Watcher["MailboxWatcher<br/>IMAP bridge"]
+    end
+
+    subgraph Peel["Peel daemon"]
+        Daemon["HTTP + MCP boundary"]
+        Store[("SQLite Run state<br/>in-memory artifact bytes")]
+        Finding{"Finding?"}
+        Scanned["Scanned<br/>clean original"]
+        Scope["ScopeAssessor<br/>advisory veto"]
+        Plan["Repair Plan<br/>from scan"]
+        PlanGate{"Scope passes<br/>and plan eligible?"}
+        RepairApproval{"Repair Approval<br/>native in TrueForge"}
+        RepairHeld["Denied<br/>no Repair side effect"]
+        Candidate["Candidate artifact"]
+        Verification{"Verification passed?"}
+        Verified["Verified artifact"]
+        DisclosureApproval{"Disclosure Approval<br/>native in TrueForge"}
+        NoSMTP["Denied<br/>no SMTP call"]
+        Refused["Refused<br/>no Disclosure"]
+    end
+
+    subgraph Sandbox["Fresh Daytona sandbox per operation"]
+        Scan["Scan"]
+        Repair["Repair"]
+        Verify["Verify"]
+    end
+
+    subgraph Services["Connected services"]
+        TrueForge["TrueForge<br/>agent session + approvals"]
+        Cerebras["Cerebras<br/>optional scope advice"]
+        SMTP["SMTP bridge"]
+        Recipient["Owned recipient mailbox"]
+        Unknown["delivery_unknown<br/>no automatic retry"]
+        Failed["failed"]
+    end
+
+    Watcher -->|eligible envelope and bytes| Daemon
+    Daemon --> Store
+    Store --> Scan
+    Scan --> Finding
+    Finding -- "No" --> Scanned
+    Finding -- "Yes" --> Scope
+    Finding -- "Yes" --> Plan
+    Scope --> PlanGate
     Plan --> PlanGate
-    PlanGate -- "No" --> Refused["Refused<br/>no Disclosure"]
-    PlanGate -- "Yes" --> RepairApproval{"Native Repair Approval"}
-    RepairApproval -- "Deny" --> RepairHeld["No Repair side effect<br/>state remains awaiting approval"]
-    RepairApproval -- "Approve" --> Repair["Repair<br/>fresh Daytona sandbox"]
-    Repair --> Candidate["Candidate artifact"]
-    Scanned --> Verify["Verify<br/>fresh Daytona sandbox"]
+    PlanGate -- "No" --> Refused
+    PlanGate -- "Yes" --> RepairApproval
+    RepairApproval -- "Deny" --> RepairHeld
+    RepairApproval -- "Approve" --> Repair
+    Repair --> Candidate
+    Scanned --> Verify
     Candidate --> Verify
-    Verify --> Verification{"Verification passed?"}
+    Verify --> Verification
     Verification -- "No" --> Refused
-    Verification -- "Yes" --> Verified["Verified artifact"]
-    Verified --> DisclosureApproval{"Native Disclosure Approval"}
-    DisclosureApproval -- "Deny" --> NoSMTP["No SMTP call"]
+    Verification -- "Yes" --> Verified
+    Verified --> DisclosureApproval
+    DisclosureApproval -- "Deny" --> NoSMTP
     NoSMTP --> Verified
-    DisclosureApproval -- "Approve" --> SMTP["SMTP bridge"]
-    SMTP -- "Accepted" --> Recipient["Owned recipient mailbox"]
-    SMTP -- "Ambiguous" --> Unknown["delivery_unknown<br/>no automatic retry"]
-    SMTP -- "Rejected" --> Failed["failed"]
-    TrueForge["TrueForge<br/>presentation and MCP client"] -. "commands and bounded metadata" .-> Daemon
-    Cerebras["Cerebras<br/>optional ScopeAssessor"] -. "advisory result" .-> Scope
+    DisclosureApproval -- "Approve" --> SMTP
+    SMTP -- "Accepted" --> Recipient
+    SMTP -- "Ambiguous" --> Unknown
+    SMTP -- "Rejected" --> Failed
+    TrueForge -. "commands and bounded metadata" .-> Daemon
+    TrueForge -. "native approval UI" .-> RepairApproval
+    TrueForge -. "native approval UI" .-> DisclosureApproval
+    Cerebras -. "advisory result" .-> Scope
 ```
 
 ## Why it exists
