@@ -13,8 +13,9 @@ Peel runs this workflow:
 3. Inspect the OOXML package for hidden worksheets and other concealed data.
 4. Refuse unsupported or unprovable files. For an eligible Finding, create a
    complete Repair Plan and wait for native Repair Approval.
-5. Run the approved Repair in a fresh Daytona sandbox, then verify the
-   candidate against the original visible workbook.
+5. Run an approved Repair in a fresh Daytona sandbox when needed. Then verify
+   either the repaired candidate or the untouched original against the
+   original visible workbook.
 6. Request a separate Disclosure Approval and send only the exact verified
    artifact to an allowlisted recipient.
 
@@ -27,29 +28,39 @@ nor an assessor can approve a Repair or Disclosure.
 
 ## System flow
 
+A clean scan still moves through `verify` before Disclosure. When a Finding
+exists, the engine returns the Repair Plan and the `ScopeAssessor` only gates
+whether Peel may present that plan for native approval.
+
 ```mermaid
 flowchart TD
     Draft["Owned Gmail draft"] --> Watcher["MailboxWatcher<br/>IMAP bridge"]
     Watcher -->|eligible envelope and bytes| Daemon["Peel daemon<br/>HTTP and MCP boundary"]
     Daemon --> Store[("SQLite Run state<br/>in-memory artifact bytes")]
-    Store --> Scan["Deterministic scan"]
+    Store --> Scan["Scan<br/>fresh Daytona sandbox"]
     Scan --> Finding{"Finding?"}
-    Finding -- "No" --> Verified["Verified original artifact"]
+    Finding -- "No" --> Scanned["Scanned<br/>clean original"]
     Finding -- "Yes" --> Scope["ScopeAssessor<br/>advisory only"]
-    Scope --> Plan{"Eligible Repair Plan?"}
-    Plan -- "No or no context" --> Refused["Refused<br/>no Disclosure"]
-    Plan -- "Yes" --> RepairApproval{"Native Repair Approval"}
-    RepairApproval -- "Deny" --> Refused
-    RepairApproval -- "Approve" --> Daytona["Fresh Daytona sandbox<br/>Repair and Verification"]
-    Daytona --> Verification{"Verification passed?"}
+    Finding -- "Yes" --> Plan["Repair Plan from scan"]
+    Scope --> PlanGate{"Scope passes and plan eligible?"}
+    Plan --> PlanGate
+    PlanGate -- "No" --> Refused["Refused<br/>no Disclosure"]
+    PlanGate -- "Yes" --> RepairApproval{"Native Repair Approval"}
+    RepairApproval -- "Deny" --> RepairHeld["No Repair side effect<br/>state remains awaiting approval"]
+    RepairApproval -- "Approve" --> Repair["Repair<br/>fresh Daytona sandbox"]
+    Repair --> Candidate["Candidate artifact"]
+    Scanned --> Verify["Verify<br/>fresh Daytona sandbox"]
+    Candidate --> Verify
+    Verify --> Verification{"Verification passed?"}
     Verification -- "No" --> Refused
-    Verification -- "Yes" --> Verified
+    Verification -- "Yes" --> Verified["Verified artifact"]
     Verified --> DisclosureApproval{"Native Disclosure Approval"}
     DisclosureApproval -- "Deny" --> NoSMTP["No SMTP call"]
+    NoSMTP --> Verified
     DisclosureApproval -- "Approve" --> SMTP["SMTP bridge"]
     SMTP -- "Accepted" --> Recipient["Owned recipient mailbox"]
     SMTP -- "Ambiguous" --> Unknown["delivery_unknown<br/>no automatic retry"]
-    SMTP -- "Rejected" --> Failed["failed or refused"]
+    SMTP -- "Rejected" --> Failed["failed"]
     TrueForge["TrueForge<br/>presentation and MCP client"] -. "commands and bounded metadata" .-> Daemon
     Cerebras["Cerebras<br/>optional ScopeAssessor"] -. "advisory result" .-> Scope
 ```
@@ -69,7 +80,7 @@ and Peel does not retry it automatically.
 ## Supported profile
 
 The demonstrated profile is WSL2/Ubuntu and an unencrypted OOXML `.xlsx` no
-larger than 10 MiB. The live qualification proves:
+larger than 10 MiB. The documented live qualification sequence covers:
 
 - a clean workbook Disclosure through an owned Gmail draft;
 - the completed Gmail Mailbox Trigger as an optional intake route; and
@@ -103,11 +114,15 @@ globally clean.
   content, and package reopening.
 - `src/http.ts` serves `/health`, `/v1/artifacts`, `/v1/commands`,
   `/v1/runs/{id}`, `/v1/runs/{id}/reveals/{reference}`, and `/mcp`.
+- The MCP `send_email` tool maps to `respond_disclosure` with an approval
+  decision. It still requires the exact Disclosure Approval binding, so it
+  cannot create an approval or bypass the daemon's checks.
 - `src/mailbox.ts` and `scripts/mailbox_fetch.py` read and deduplicate eligible
   drafts. The watcher does not scan, repair, approve, or disclose files.
 - `src/adapters.ts` connects live runs to Daytona and SMTP. It also provides
   fake adapters and the default fail-closed ScopeAssessor. Production live
-  mode does not use the local Python workbook engine.
+  mode runs scan, Repair, and Verification through the Python engine in fresh
+  Daytona sandboxes and does not use the local Python workbook engine.
 - `schemas/` contains the versioned daemon and engine contracts.
 - `scripts/` contains the environment, mail, TrueForge, Daytona, live journey,
   privacy, and rehearsal gates.
